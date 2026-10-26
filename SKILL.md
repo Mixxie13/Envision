@@ -41,6 +41,7 @@ Run this prompt once per brand:
 - Rank and keep up to 3 per brand.
 
 ## Step 6: Find and cross-check the emails
+Run the helper commands below from the repository root, subject to the existing paid-credit approval rules. Credentials come from `FINDYMAIL_API_KEY` and `NEVERBOUNCE_API_KEY`; never print their values. Read the provider result in the returned JSON; `ok: true` alone does not establish email validity.
 1. **HubSpot:** if they replied before, use that email.
 2. **Apollo:** the email revealed in Step 4.
 3. **AI anchor search, once per company:**
@@ -50,13 +51,16 @@ Run this prompt once per brand:
    - Run at least 10 searches before calling it "not found".
    - Build each person's email from that pattern.
 4. **Findymail:** search by name and company domain.
+   - Run `python3 scripts/findymail.py find --name "<full name>" --domain "<company domain>"`.
 5. **Compare:**
    - All agree: confirmed.
    - Disagree: the email matching the anchor wins. No anchor: flag it, don't guess.
    - Only Apollo has one: label "unverified".
 6. **NeverBounce:**
+   - Run `python3 scripts/neverbounce.py --email "<email>"`.
    - Valid: use. Invalid: drop.
    - Unknown or catch-all: second check with Findymail's verifier.
+     Run `python3 scripts/findymail.py verify --email "<email>"` for that second check.
    - On catch-all domains "valid" proves nothing; trust the anchor.
 
 ## Step 7: Pre-filled review sheet
