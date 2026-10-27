@@ -26,25 +26,24 @@ def redact(value, key):
 
 
 def request(service, operation, **fields):
-    variable = {'findymail': 'FINDYMAIL_API_KEY',
-                'neverbounce': 'NEVERBOUNCE_API_KEY'}[service]
-    key = os.environ.get(variable)
-    if not key or (service == 'findymail' and not key.strip()):
-        raise ClientError(f'Missing credential: set {variable} in the environment.')
-    if service == 'findymail':
-        path = {'find': '/api/search/name', 'verify': '/api/verify'}[operation]
-        req = urllib.request.Request(
-            'https://app.findymail.com' + path,
-            data=json.dumps(fields).encode(),
-            headers={'Authorization': 'Bearer ' + key,
-                     'Content-Type': 'application/json', 'Accept': 'application/json'},
-            method='POST')
-    else:
-        req = urllib.request.Request(
-            'https://api.neverbounce.com/v4.2/single/check',
-            data=json.dumps({'key': key, 'email': fields['email']}).encode(),
-            headers={'Content-Type': 'application/json',
-                     'Accept': 'application/json'}, method='POST')
+    key = os.environ.get('RELAY_TOKEN')
+    if not key or not key.strip():
+        raise ClientError('Missing credential: set RELAY_TOKEN in the environment.')
+    method, path, required = {
+        ('findymail', 'find'): ('POST', '/findymail/find', {'name', 'domain'}),
+        ('findymail', 'verify'): ('POST', '/findymail/verify', {'email'}),
+        ('findymail', 'credits'): ('GET', '/findymail/credits', set()),
+        ('neverbounce', 'account'): ('GET', '/neverbounce/account', set()),
+        ('neverbounce', 'verify'): ('POST', '/neverbounce/check', {'email'}),
+    }[(service, operation)]
+    if set(fields) != required:
+        raise ClientError('Invalid fields for this operation.')
+    req = urllib.request.Request(
+        'https://envision-email-relay.onrender.com' + path,
+        data=json.dumps(fields).encode() if method == 'POST' else None,
+        headers={'Authorization': 'Bearer ' + key,
+                 'Content-Type': 'application/json', 'Accept': 'application/json'},
+        method=method)
     try:
         with urllib.request.build_opener(NoRedirect()).open(req, timeout=30) as response:
             data = json.load(response)
@@ -68,17 +67,25 @@ def main(service):
     parser = Parser(description='JSON API helper. Requests may consume paid credits; obtain required approval first.')
     if service == 'findymail':
         sub = parser.add_subparsers(dest='operation', required=True, parser_class=Parser)
+        sub.add_parser('credits')
         find = sub.add_parser('find')
         find.add_argument('--name', required=True, help='Full name')
         find.add_argument('--domain', required=True, help='Company domain')
         verify = sub.add_parser('verify')
         verify.add_argument('--email', required=True)
     else:
-        parser.add_argument('--email', required=True)
-        parser.set_defaults(operation='verify')
+        parser.add_argument('operation', nargs='?', choices=('verify', 'account'), default='verify')
+        parser.add_argument('--email')
     try:
         args = vars(parser.parse_args())
         operation = args.pop('operation')
+        if service == 'neverbounce':
+            if operation == 'account':
+                if args['email'] is not None:
+                    raise ClientError('Account info does not accept an email.')
+                args.pop('email')
+            elif args['email'] is None:
+                raise ClientError('Verification requires --email.')
         if any(not value.strip() for value in args.values()):
             raise ClientError('Input fields must not be blank.')
         result = request(service, operation, **args)

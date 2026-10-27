@@ -16,38 +16,92 @@ class HelpersTest(unittest.TestCase):
     def call(self, service, operation, **fields):
         response = unittest.mock.MagicMock()
         response.__enter__.return_value = io.StringIO('{"result":"valid"}')
-        with patch.dict('os.environ', {'FINDYMAIL_API_KEY': 'test-secret',
-                                     'NEVERBOUNCE_API_KEY': 'mock-placeholder:+/=%&'}, clear=True), \
+        with patch.dict('os.environ', {'RELAY_TOKEN': 'test-secret'}, clear=True), \
              patch.object(email_api.urllib.request, 'build_opener') as build:
             build.return_value.open.return_value = response
             result = email_api.request(service, operation, **fields)
             req = build.return_value.open.call_args.args[0]
             self.assertEqual(build.return_value.open.call_args.kwargs['timeout'], 30)
             self.assertTrue(result['ok'])
+            self.assertEqual(result['service'], service)
+            self.assertEqual(result['operation'], operation)
+            self.assertEqual(result['data'], {'result': 'valid'})
             return req
+
+    def test_free_checks(self):
+        for service, operation, path in (
+                ('findymail', 'credits', '/findymail/credits'),
+                ('neverbounce', 'account', '/neverbounce/account')):
+            req = self.call(service, operation)
+            self.assertEqual(req.full_url, 'https://envision-email-relay.onrender.com' + path)
+            self.assertEqual(req.method, 'GET')
+            self.assertIsNone(req.data)
+            self.assertEqual(req.get_header('Authorization'), 'Bearer test-secret')
+
+    def test_provider_keys_cannot_replace_relay_token(self):
+        with patch.dict('os.environ', {'FINDYMAIL_API_KEY': 'unused',
+                                      'NEVERBOUNCE_API_KEY': 'unused'}, clear=True), \
+             patch.object(email_api.urllib.request, 'build_opener') as build:
+            with self.assertRaisesRegex(email_api.ClientError, 'RELAY_TOKEN'):
+                email_api.request('findymail', 'credits')
+            build.assert_not_called()
+
+    def test_cli_operations(self):
+        for service, argv, operation, fields in (
+                ('findymail', ['credits'], 'credits', {}),
+                ('neverbounce', ['account'], 'account', {}),
+                ('neverbounce', ['--email', 'person@example.com'], 'verify',
+                 {'email': 'person@example.com'}),
+                ('neverbounce', ['verify', '--email', 'person@example.com'], 'verify',
+                 {'email': 'person@example.com'})):
+            with patch.object(sys, 'argv', ['helper.py'] + argv), \
+                 patch.object(email_api, 'request', return_value={'ok': True}) as call, \
+                 contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertEqual(email_api.main(service), 0)
+                self.assertTrue(json.loads(out.getvalue())['ok'])
+                call.assert_called_once_with(service, operation, **fields)
+
+    def test_invalid_arguments_never_connect(self):
+        for argv in ([], ['account', '--email', 'person@example.com'],
+                     ['--email', ' '], ['--url', 'https://example.com']):
+            with patch.object(sys, 'argv', ['neverbounce.py'] + argv), \
+                 patch.object(email_api, 'request') as call, \
+                 contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertEqual(email_api.main('neverbounce'), 1)
+                self.assertFalse(json.loads(out.getvalue())['ok'])
+                call.assert_not_called()
+
+    def test_echoed_relay_token_redacted(self):
+        response = unittest.mock.MagicMock()
+        response.__enter__.return_value = io.StringIO('{"test-secret":["test-secret"]}')
+        with patch.dict('os.environ', {'RELAY_TOKEN': 'test-secret'}, clear=True), \
+             patch.object(email_api.urllib.request, 'build_opener') as build:
+            build.return_value.open.return_value = response
+            result = email_api.request('findymail', 'credits')
+            self.assertEqual(result['data'], {'[REDACTED]': ['[REDACTED]']})
 
     def test_findymail_find(self):
         req = self.call('findymail', 'find', name='Example Person', domain='example.com')
-        self.assertEqual(req.full_url, 'https://app.findymail.com/api/search/name')
+        self.assertEqual(req.full_url, 'https://envision-email-relay.onrender.com/findymail/find')
         self.assertEqual(req.method, 'POST')
         self.assertEqual(req.get_header('Authorization'), 'Bearer test-secret')
         self.assertEqual(json.loads(req.data), {'name': 'Example Person', 'domain': 'example.com'})
 
     def test_findymail_verify(self):
         req = self.call('findymail', 'verify', email='person@example.com')
-        self.assertEqual(req.full_url, 'https://app.findymail.com/api/verify')
+        self.assertEqual(req.full_url, 'https://envision-email-relay.onrender.com/findymail/verify')
         self.assertEqual(json.loads(req.data), {'email': 'person@example.com'})
 
     def test_neverbounce(self):
         email = 'person+tag&test@example.com'
-        req = self.call('neverbounce', 'verify', email=email,
-                        key='user-input-must-not-override-environment')
-        self.assertEqual(req.full_url, 'https://api.neverbounce.com/v4.2/single/check')
+        req = self.call('neverbounce', 'verify', email=email)
+        self.assertEqual(req.full_url, 'https://envision-email-relay.onrender.com/neverbounce/check')
         self.assertEqual(req.method, 'POST')
         self.assertEqual(req.get_header('Content-type'), 'application/json')
         self.assertEqual(json.loads(req.data),
-                         {'key': 'mock-placeholder:+/=%&', 'email': email})
-        self.assertIn(b'mock-placeholder:+/=%&', req.data)
+                         {'email': email})
+        self.assertEqual(req.get_header('Authorization'), 'Bearer test-secret')
+        self.assertNotIn(b'test-secret', req.data)
 
     def test_missing_credentials_never_connect(self):
         for service in ('findymail', 'neverbounce'):
@@ -58,7 +112,7 @@ class HelpersTest(unittest.TestCase):
                 build.assert_not_called()
 
     def test_http_errors_hide_secrets(self):
-        with patch.dict('os.environ', {'FINDYMAIL_API_KEY': 'test-secret'}, clear=True), \
+        with patch.dict('os.environ', {'RELAY_TOKEN': 'test-secret'}, clear=True), \
              patch.object(email_api.urllib.request, 'build_opener') as build:
             build.return_value.open.side_effect = urllib.error.HTTPError(
                 'https://example.com/test-secret', 401, 'test-secret', {}, None)
@@ -80,7 +134,7 @@ class HelpersTest(unittest.TestCase):
 
     def test_invalid_json_and_connection_errors(self):
         for failure in (ValueError('test-secret'), urllib.error.URLError('test-secret')):
-            with patch.dict('os.environ', {'FINDYMAIL_API_KEY': 'test-secret'}, clear=True), \
+            with patch.dict('os.environ', {'RELAY_TOKEN': 'test-secret'}, clear=True), \
                  patch.object(email_api.urllib.request, 'build_opener') as build:
                 build.return_value.open.side_effect = failure
                 with self.assertRaises(email_api.ClientError) as caught:
