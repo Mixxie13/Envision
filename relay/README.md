@@ -39,7 +39,9 @@ Every other route requires `Authorization: Bearer <RELAY_TOKEN>`.
 
 Both Dripify routes require the existing relay Bearer authentication. The relay
 sends `DRIPIFY_API_KEY` only in the upstream `X-Api-Key` header to the fixed
-`api.dripify.com` host. Lead search accepts either field or both in one JSON object;
+`api.dripify.com` host, along with `Accept: application/json` and
+`User-Agent: Envision-Relay/1.0` to avoid the observed Cloudflare 1010 rejection.
+Lead search accepts either field or both in one JSON object;
 empty objects, unknown fields, and blank or non-string values are rejected.
 The LinkedIn URL is a search value, never a destination fetched by the relay.
 These routes only list campaigns or search leads; no Dripify write/upload routes
