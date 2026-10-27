@@ -41,7 +41,7 @@ Run this prompt once per brand:
 - Rank and keep up to 3 per brand.
 
 ## Step 6: Find and cross-check the emails
-Run the helper commands below from the repository root, subject to the existing paid-credit approval rules. Credentials come from `FINDYMAIL_API_KEY` and `NEVERBOUNCE_API_KEY`; never print their values. Read the provider result in the returned JSON; `ok: true` alone does not establish email validity.
+Run the helper commands below from the repository root, subject to the existing paid-credit approval rules. Codex helpers use only the configured `RELAY_TOKEN` through `https://envision-email-relay.onrender.com`; never print its value. Provider keys belong on the relay, not in Codex. Read the provider result in the returned JSON; `ok: true` alone does not establish email validity.
 1. **HubSpot:** if they replied before, use that email.
 2. **Apollo:** the email revealed in Step 4.
 3. **AI anchor search, once per company:**
@@ -63,8 +63,25 @@ Run the helper commands below from the repository root, subject to the existing 
      Run `python3 scripts/findymail.py verify --email "<email>"` for that second check.
    - On catch-all domains "valid" proves nothing; trust the anchor.
 
+## Step 6a: Select the outreach route and check Dripify (read-only)
+- Preserve all sourcing, LinkedIn confirmation, ranking, email verification and approval rules above.
+- If a usable verified email exists under Step 6, prioritize **email outreach**. Unverified, invalid, unresolved unknown or catch-all results alone are not usable verified emails; retain the anchor and second-check rules above.
+- If email outreach is selected, do not send that contact to Dripify, including for lookup. Record route `email` and Dripify status `not checked — email selected`.
+- Otherwise, check existing Dripify leads by the confirmed LinkedIn URL first:
+  `python3 scripts/dripify.py search --linkedin-url "<LinkedIn URL>"`.
+- If LinkedIn finds an existing lead, flag `existing in Dripify`; do not duplicate or enroll them.
+- Only after a successful, explicit no-match LinkedIn result, use any known email as a secondary duplicate lookup:
+  `python3 scripts/dripify.py search --email "<known email>"`.
+  An unverified email may identify an existing lead; this does not make it usable for email outreach.
+- If either lookup finds the contact, flag `existing in Dripify`. If LinkedIn and any available secondary email lookup explicitly find no match, mark `eligible for Dripify outreach`.
+- Missing or unconfirmed LinkedIn URL, errors, provider failures, incomplete/paginated results or ambiguous responses mean `Dripify check pending`; do not infer absence or eligibility. Resolve all relevant result pages before declaring no match.
+- Read provider data, not just transport `ok`. Record the lookup identifier, result and date checked. If response semantics are unclear, leave pending for review.
+- Campaigns can be listed for reference with `python3 scripts/dripify.py campaigns`.
+- These helpers call only `GET /dripify/campaigns` and `POST /dripify/leads/search` on the relay using `RELAY_TOKEN`. Never call Dripify directly or require `DRIPIFY_API_KEY` in Codex.
+- Eligibility is a review flag only. Do not create leads, add anyone to a campaign, enroll contacts, send outreach or make any external write operations in this integration. Existing approvals still apply to subsequent work.
+
 ## Step 7: Pre-filled review sheet
-- One row per contact: brand, name, title, LinkedIn, email, status (confirmed / pattern-confirmed / unverified), anchor link, sources that agreed, date checked.
+- One row per contact: brand, name, title, LinkedIn, email, status (confirmed / pattern-confirmed / unverified), anchor link, sources that agreed, date checked, outreach route, Dripify status and lookup evidence.
 - Roxy checks it first. Then Bridget marks each row ✅, ❌ or a note.
 
 ## Step 8: Load into HubSpot
