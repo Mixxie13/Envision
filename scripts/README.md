@@ -55,3 +55,34 @@ Offline tests (no API requests or real credentials):
 ```sh
 python3 -B -m unittest discover -s tests -v
 ```
+
+## Dripify read-only lookups
+
+Use only the configured `RELAY_TOKEN`; no `DRIPIFY_API_KEY` is read or required
+in Codex. The deployed relay provides these routes; no relay deployment changes
+are needed here.
+
+```sh
+python3 scripts/dripify.py campaigns
+python3 scripts/dripify.py search --linkedin-url 'https://www.linkedin.com/in/example'
+# Only after a confirmed LinkedIn no-match, use a known email as secondary lookup:
+python3 scripts/dripify.py search --email person@example.com
+```
+
+| Operation | Relay method and path | JSON body |
+| --- | --- | --- |
+| Campaign listing | `GET /dripify/campaigns` | None |
+| Lead search by LinkedIn | `POST /dripify/leads/search` | `{"linkedin_url":"https://www.linkedin.com/in/example"}` |
+| Secondary lead search by email | `POST /dripify/leads/search` | `{"email":"person@example.com"}` |
+
+Search accepts exactly one identifier so the workflow can inspect LinkedIn results
+before deciding whether email fallback is needed. Raw provider JSON is returned;
+`ok: true` means HTTP/JSON transport succeeded, not that a lead exists or is absent.
+Resolve incomplete results and provider errors before marking eligibility.
+
+Follow Step 6a of the sourcing skill: usable verified email takes priority and
+skips Dripify lookup entirely. Otherwise check LinkedIn first, then a known email
+on explicit no-match; flag existing leads without duplicating them. Only confirmed
+absence permits the review flag `eligible for Dripify outreach`. Missing identifiers,
+errors and ambiguity remain pending. There are no create, enrollment, campaign-add
+or send commands. Listing campaigns does not select or join a campaign.

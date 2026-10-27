@@ -35,7 +35,14 @@ def request(service, operation, **fields):
         ('findymail', 'credits'): ('GET', '/findymail/credits', set()),
         ('neverbounce', 'account'): ('GET', '/neverbounce/account', set()),
         ('neverbounce', 'verify'): ('POST', '/neverbounce/check', {'email'}),
+        ('dripify', 'campaigns'): ('GET', '/dripify/campaigns', set()),
+        ('dripify', 'search'): ('POST', '/dripify/leads/search', set(fields)),
     }[(service, operation)]
+    if service == 'dripify' and operation == 'search':
+        if set(fields) not in ({'linkedin_url'}, {'email'}):
+            raise ClientError('Search requires exactly one LinkedIn URL or email.')
+        if any(not isinstance(value, str) or not value.strip() for value in fields.values()):
+            raise ClientError('Search fields must be nonempty strings.')
     if set(fields) != required:
         raise ClientError('Invalid fields for this operation.')
     req = urllib.request.Request(
@@ -73,12 +80,21 @@ def main(service):
         find.add_argument('--domain', required=True, help='Company domain')
         verify = sub.add_parser('verify')
         verify.add_argument('--email', required=True)
+    elif service == 'dripify':
+        sub = parser.add_subparsers(dest='operation', required=True, parser_class=Parser)
+        sub.add_parser('campaigns')
+        search = sub.add_parser('search')
+        lookup = search.add_mutually_exclusive_group(required=True)
+        lookup.add_argument('--linkedin-url')
+        lookup.add_argument('--email', help='Secondary lookup after LinkedIn finds no match')
     else:
         parser.add_argument('operation', nargs='?', choices=('verify', 'account'), default='verify')
         parser.add_argument('--email')
     try:
         args = vars(parser.parse_args())
         operation = args.pop('operation')
+        if service == 'dripify':
+            args = {key: value for key, value in args.items() if value is not None}
         if service == 'neverbounce':
             if operation == 'account':
                 if args['email'] is not None:
