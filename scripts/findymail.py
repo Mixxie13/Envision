@@ -1,4 +1,4 @@
-"""Findymail email finding and verification CLI."""
+"""Findymail finding, verification, and credits CLI via the Render relay."""
 from email_api import main
 
 if __name__ == '__main__':
