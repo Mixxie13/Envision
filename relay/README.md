@@ -11,6 +11,9 @@ Securely inject `FINDYMAIL_API_KEY`, `NEVERBOUNCE_API_KEY`, and a strong random
 `RELAY_TOKEN` through your deployment's environment or secret manager. Never put
 credentials in source, command arguments, or logs. Missing credentials fail closed.
 
+Dripify read-only routes use `DRIPIFY_API_KEY`, already configured on Render.
+Keep this key server-side on Render; Codex callers need only `RELAY_TOKEN`.
+
 Start from the repository root:
 
 ```sh
@@ -31,6 +34,18 @@ Every other route requires `Authorization: Bearer <RELAY_TOKEN>`.
 | `GET /findymail/credits` | None | GET `https://app.findymail.com/api/credits?type=finder` |
 | `GET /neverbounce/account` | None | `https://api.neverbounce.com/v4.2/account/info` |
 | `POST /neverbounce/check` | `{"email":"person@company.com"}` | `https://api.neverbounce.com/v4.2/single/check` |
+| `GET /dripify/campaigns` | None | GET `https://api.dripify.com/v1/open-api/campaigns` |
+| `POST /dripify/leads/search` | `{"email":"person@company.com"}` and/or `{"linkedinUrl":"https://www.linkedin.com/in/example"}` | `https://api.dripify.com/v1/open-api/leads/search` |
+
+Both Dripify routes require the existing relay Bearer authentication. The relay
+sends `DRIPIFY_API_KEY` only in the upstream `X-Api-Key` header to the fixed
+`api.dripify.com` host. Lead search accepts either field or both in one JSON object;
+empty objects, unknown fields, and blank or non-string values are rejected.
+The LinkedIn URL is a search value, never a destination fetched by the relay.
+These routes only list campaigns or search leads; no Dripify write/upload routes
+are provided. They share the redirect blocking, verified TLS, 30-second timeout,
+credential redaction, and sanitized HTTP-error handling described below.
+No live Dripify calls were made during development.
 
 Findymail credentials are sent in the upstream Authorization header. NeverBounce
 credentials are sent only in the server-side JSON POST body, including for account

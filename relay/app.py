@@ -1,4 +1,4 @@
-"""Authenticated relay for fixed Findymail and NeverBounce endpoints."""
+"""Authenticated relay for fixed Findymail, NeverBounce, and Dripify endpoints."""
 import hmac
 import json
 import os
@@ -41,7 +41,7 @@ def handle_error(exc):
 def redact(value):
     """Remove credentials even if a provider echoes them in its JSON."""
     if isinstance(value, str):
-        for name in ('FINDYMAIL_API_KEY', 'NEVERBOUNCE_API_KEY', 'RELAY_TOKEN'):
+        for name in ('FINDYMAIL_API_KEY', 'NEVERBOUNCE_API_KEY', 'DRIPIFY_API_KEY', 'RELAY_TOKEN'):
             secret = os.environ.get(name)
             if secret:
                 value = value.replace(secret, '[REDACTED]')
@@ -61,6 +61,8 @@ def upstream(url, variable, fields, neverbounce=False, method='POST'):
     payload = dict(fields)
     if neverbounce:
         payload['key'] = key
+    elif variable == 'DRIPIFY_API_KEY':
+        headers['X-Api-Key'] = key
     else:
         headers['Authorization'] = 'Bearer ' + key
     body = json.dumps(payload).encode('utf-8') if method == 'POST' else None
@@ -137,3 +139,21 @@ def neverbounce_check():
         return jsonify(error='Provide only a nonempty email string'), 400
     return upstream('https://api.neverbounce.com/v4.2/single/check',
                     'NEVERBOUNCE_API_KEY', fields, neverbounce=True)
+
+
+@app.get('/dripify/campaigns')
+def dripify_campaigns():
+    return upstream('https://api.dripify.com/v1/open-api/campaigns',
+                    'DRIPIFY_API_KEY', {}, method='GET')
+
+
+@app.post('/dripify/leads/search')
+def dripify_leads_search():
+    fields = request.get_json()
+    if (not isinstance(fields, dict) or not fields
+            or not set(fields) <= {'email', 'linkedinUrl'}
+            or any(not isinstance(value, str) or not value.strip()
+                   for value in fields.values())):
+        return jsonify(error='Provide nonempty email and/or linkedinUrl strings only'), 400
+    return upstream('https://api.dripify.com/v1/open-api/leads/search',
+                    'DRIPIFY_API_KEY', {name: value.strip() for name, value in fields.items()})
