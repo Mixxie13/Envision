@@ -63,6 +63,7 @@ def upstream(url, variable, fields, neverbounce=False, method='POST'):
         payload['key'] = key
     elif variable == 'DRIPIFY_API_KEY':
         headers['X-Api-Key'] = key
+        headers['User-Agent'] = 'Envision-Relay/1.0'
     else:
         headers['Authorization'] = 'Bearer ' + key
     body = json.dumps(payload).encode('utf-8') if method == 'POST' else None
