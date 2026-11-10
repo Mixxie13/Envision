@@ -42,30 +42,35 @@ Run this prompt once per brand:
 
 ## Step 6: Find and cross-check the emails
 Run the helper commands below from the repository root, subject to the existing paid-credit approval rules. Codex helpers use only the configured `RELAY_TOKEN` through `https://envision-email-relay.onrender.com`; never print its value. Provider keys belong on the relay, not in Codex. Read the provider result in the returned JSON; `ok: true` alone does not establish email validity.
-1. **HubSpot:** if they replied before, use that email.
+1. **HubSpot:** if they replied before, prioritize that email as a candidate; prior replies do not bypass the eligibility checks below.
 2. **Apollo:** the email revealed in Step 4.
 3. **AI anchor search, once per company:**
    - Find one real, published email of a named staff member. Generic inboxes (info@, hello@, press@) don't count.
    - Look in press releases, recall notices, trademark filings, team pages, German Impressum pages, LinkedIn posts.
    - Record the email domain (often different from the website), the pattern (first.last@, flast@, first@) and the source link.
    - Run at least 10 searches before calling it "not found".
-   - Build each person's email from that pattern.
+   - Build each person's email from that pattern and label its source `pattern-inferred`, never automatically confirmed. Keep this source label even if later verification makes the address eligible.
 4. **Findymail:** search by name and company domain.
    - Run `python3 scripts/findymail.py find --name "<full name>" --domain "<company domain>"`.
 5. **Compare:**
-   - All agree: confirmed.
-   - Disagree: the email matching the anchor wins. No anchor: flag it, don't guess.
+   - All agree: record source agreement; agreement alone does not confirm deliverability or outreach eligibility.
+   - Disagree: prioritize the email matching the anchor for verification, but retain unresolved conflicts as risk flags. No anchor: flag it, don't guess.
    - Only Apollo has one: label "unverified".
 6. **NeverBounce:**
    - Run `python3 scripts/neverbounce.py --email "<email>"`.
-   - Valid: use. Invalid: drop.
-   - Unknown or catch-all: second check with Findymail's verifier.
+   - Record the actual provider result and verification date. A positive `valid` result is necessary evidence, but does not bypass the eligibility checks below.
+   - Invalid: drop from email outreach. Unknown, catch-all, failed verification, missing results or transport errors do not qualify an address for email outreach. Keep unresolved cases pending.
+   - Unknown or catch-all: obtain the required paid-credit approval before a second check with Findymail's verifier.
      Run `python3 scripts/findymail.py verify --email "<email>"` for that second check.
-   - On catch-all domains "valid" proves nothing; trust the anchor.
+   - A Findymail second check must not automatically override unresolved catch-all or unknown risk. Preserve both provider results and any disagreement; a published anchor supports address sourcing, not proof of deliverability.
+7. **Email outreach eligibility:**
+   - Mark an address eligible only when it has a positive verification result, the person's current role and company have been confirmed with evidence, and no unresolved risk flags remain.
+   - Pattern inference, source agreement, prior replies, or a positive second check alone cannot satisfy these conditions. Document evidence resolving each risk; otherwise leave email outreach pending/ineligible.
+   - Eligibility is a review flag, not permission to send or update records. Roxy reviews first, then Bridget; existing paid-credit and HubSpot approval requirements remain in force.
 
 ## Step 6a: Select the outreach route and check Dripify (read-only)
 - Preserve all sourcing, LinkedIn confirmation, ranking, email verification and approval rules above.
-- If a usable verified email exists under Step 6, prioritize **email outreach**. Unverified, invalid, unresolved unknown or catch-all results alone are not usable verified emails; retain the anchor and second-check rules above.
+- If a usable verified email exists under Step 6, prioritize **email outreach**. Apply all three Step 6 eligibility conditions: positive verification, confirmed current role/company, and no unresolved risk flags. Unverified, invalid, unknown, catch-all or failed results do not automatically qualify; anchors and second checks do not bypass these conditions.
 - If email outreach is selected, do not send that contact to Dripify, including for lookup. Record route `email` and Dripify status `not checked — email selected`.
 - Otherwise, check existing Dripify leads by the confirmed LinkedIn URL first:
   `python3 scripts/dripify.py search --linkedin-url "<LinkedIn URL>"`.
@@ -81,7 +86,8 @@ Run the helper commands below from the repository root, subject to the existing 
 - Eligibility is a review flag only. Do not create leads, add anyone to a campaign, enroll contacts, send outreach or make any external write operations in this integration. Existing approvals still apply to subsequent work.
 
 ## Step 7: Pre-filled review sheet
-- One row per contact: brand, name, title, LinkedIn, email, status (confirmed / pattern-confirmed / unverified), anchor link, sources that agreed, date checked, outreach route, Dripify status and lookup evidence.
+- One row per contact: brand, name, title, LinkedIn, email, address source (including `pattern-inferred`), verification status (positive / invalid / unknown / catch-all / failed / unverified), verification date, provider name and exact result for every check (retain both NeverBounce and Findymail results), verification evidence, anchor link, sources that agreed, current role/company confirmation evidence and date, unresolved risk flags and resolution evidence, email outreach eligibility with reason, date checked, outreach route, Dripify status and lookup evidence.
+- Keep address source separate from verification status and eligibility. Never label pattern inference `confirmed` or `pattern-confirmed`; an eligible address must meet all Step 6 conditions.
 - Roxy checks it first. Then Bridget marks each row ✅, ❌ or a note.
 
 ## Step 8: Load into HubSpot
