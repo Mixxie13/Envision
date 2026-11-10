@@ -45,9 +45,12 @@ def request(service, operation, **fields):
             raise ClientError('Search fields must be nonempty strings.')
     if set(fields) != required:
         raise ClientError('Invalid fields for this operation.')
+    payload = dict(fields)
+    if service == 'dripify' and operation == 'search' and 'linkedin_url' in payload:
+        payload['linkedinUrl'] = payload.pop('linkedin_url')
     req = urllib.request.Request(
         'https://envision-email-relay.onrender.com' + path,
-        data=json.dumps(fields).encode() if method == 'POST' else None,
+        data=json.dumps(payload).encode() if method == 'POST' else None,
         headers={'Authorization': 'Bearer ' + key,
                  'Content-Type': 'application/json', 'Accept': 'application/json'},
         method=method)

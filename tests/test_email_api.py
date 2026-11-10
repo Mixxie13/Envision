@@ -38,6 +38,41 @@ class HelpersTest(unittest.TestCase):
             self.assertIsNone(req.data)
             self.assertEqual(req.get_header('Authorization'), 'Bearer test-secret')
 
+    def test_dripify_linkedin_cli_uses_relay_field_name(self):
+        linkedin_url = 'https://www.linkedin.com/in/example'
+
+        def relay_response(req, timeout):
+            self.assertEqual(req.full_url,
+                             'https://envision-email-relay.onrender.com/dripify/leads/search')
+            self.assertEqual(req.method, 'POST')
+            self.assertEqual(req.get_header('Authorization'), 'Bearer test-secret')
+            self.assertEqual(timeout, 30)
+            payload = json.loads(req.data)
+            # Mock the relay's accepted field names, rejecting the old spelling.
+            if (not isinstance(payload, dict) or not payload
+                    or not set(payload) <= {'email', 'linkedinUrl'}
+                    or any(not isinstance(value, str) or not value.strip()
+                           for value in payload.values())):
+                raise urllib.error.HTTPError(req.full_url, 400, 'Invalid fields', {}, None)
+            self.assertEqual(payload, {'linkedinUrl': linkedin_url})
+            response = unittest.mock.MagicMock()
+            response.__enter__.return_value = io.StringIO('{"leads":[]}')
+            return response
+
+        with patch.object(sys, 'argv', ['dripify.py', 'search', '--linkedin-url', linkedin_url]), \
+             patch.dict('os.environ', {'RELAY_TOKEN': 'test-secret'}, clear=True), \
+             patch.object(email_api.urllib.request, 'build_opener') as build, \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            build.return_value.open.side_effect = relay_response
+            self.assertEqual(email_api.main('dripify'), 0)
+            self.assertEqual(json.loads(out.getvalue()), {
+                'ok': True, 'service': 'dripify', 'operation': 'search', 'data': {'leads': []}})
+            build.return_value.open.assert_called_once()
+
+    def test_dripify_email_payload_unchanged(self):
+        req = self.call('dripify', 'search', email='person@example.com')
+        self.assertEqual(json.loads(req.data), {'email': 'person@example.com'})
+
     def test_provider_keys_cannot_replace_relay_token(self):
         with patch.dict('os.environ', {'FINDYMAIL_API_KEY': 'unused',
                                       'NEVERBOUNCE_API_KEY': 'unused'}, clear=True), \
