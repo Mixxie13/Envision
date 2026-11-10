@@ -173,3 +173,132 @@ HubSpot write or enrollment capability, make the action path require a fresh gat
 result plus independently verified approvals and a final conflict check. A local
 check alone cannot provide concurrency protection against another process enrolling
 or contacting the person after evaluation.
+
+## Phase 2A: offline evidence intake foundation
+
+Implemented in `scripts/evidence.py`, with synthetic fixtures built in
+`tests/test_evidence.py`. This is **not** a HubSpot/Dripify response adapter or a
+live collector. No production provider schema, status, property, endpoint or
+permission is defined or implied. There is no network, filesystem, credential or
+external-write access in the intake module.
+
+Use the existing Phase 1 record as the header: `subject`, `channel`, `approvals`
+and an explicit `unresolved_risks` list. Supply evidence separately as a list of
+internal envelopes. Header `checks` are ignored to prevent bypassing intake.
+The module does not read or change the prospecting sheet, confidence labels, SOPs,
+provider helpers or relay.
+
+```python
+from evidence import assemble, evaluate_evidence
+
+# All arguments are already-loaded local data. No fetch occurs.
+assembled = assemble(record_header, internal_envelopes)
+report = evaluate_evidence(record_header, internal_envelopes, now=evaluation_time)
+# report: {"record": Phase_1_record, "intake": provenance_trace,
+#          "evaluation": unchanged_Phase_1_result}
+```
+
+Only `schema: envision.internal-evidence.v1` is supported. This identifier names
+our local intake contract, never a provider schema. Each envelope has:
+
+```json
+{
+  "schema": "envision.internal-evidence.v1",
+  "check": "identity",
+  "identity": {
+    "contact_id": "synthetic-1",
+    "basis": "email",
+    "value": "person@example.com"
+  },
+  "provenance": {
+    "source_ref": "synthetic/identity",
+    "coverage_ref": "synthetic coverage only",
+    "capability_verified": true,
+    "coverage_verified": true,
+    "pagination_complete": true,
+    "lookup_succeeded": true
+  },
+  "evidence": {
+    "subject": {
+      "contact_id": "synthetic-1",
+      "company": "Example",
+      "full_name": "Example Person",
+      "email": "person@example.com"
+    },
+    "result": "confirmed",
+    "state": "ok",
+    "complete": true,
+    "source": "synthetic/identity",
+    "observed_at": "2030-01-01T00:00:00Z",
+    "expires_at": "2030-01-03T00:00:00Z",
+    "policy_ref": "synthetic policy; not production"
+  }
+}
+```
+
+This example is entirely synthetic; its dates and booleans do not establish real
+policy, provider coverage or account access. The full `evidence.subject` must
+exactly equal the header subject, including linkage fields. `evidence.source` must
+match `provenance.source_ref`; both source and coverage references must be nonblank.
+All four provenance flags must be explicitly true for a passing intake. They are
+trusted local assertions, not facts independently established by this module.
+`coverage_ref` must eventually point to evidence of scope/retention/completeness;
+setting a flag true is not a substitute for that evidence.
+
+Identity binding uses the local contact ID plus exactly one identity basis:
+
+- `basis: email` requires exact equality to the subject email. No case folding,
+  alias inference or email-to-LinkedIn conversion is performed.
+- `basis: linkedin` requires exact equality to the subject LinkedIn URL and
+  `confirmed_personal: true`. No URL normalization, scraping or assumption that
+  a company page identifies a person is performed.
+- Company/name alone never bind identity. Both identities are linked only by the
+  explicitly supplied matching subject and local ID; this does not prove that a
+  real provider record or account owns either identifier.
+
+Unsupported schemas/checks, malformed inputs, failed lookups, unverified coverage
+or capabilities, incomplete pagination and identity mismatches add unresolved risks.
+An empty response or `ok: true` HTTP wrapper cannot establish a passing check.
+Missing evidence stays missing; incomplete evidence cannot turn into confirmed
+absence. Phase 1 performs the existing result, observation-date, expiry, policy and
+approval checks. No freshness window or consent policy is added by intake.
+
+Every envelope's provenance, original internal evidence, identity basis and intake
+issues remain in the separate `intake` trace. Inputs are copied, not modified.
+Do not put tokens or credentials in these local records; the module has no secrets
+and does not attempt to sanitize arbitrary input for public sharing. Retain the
+report in the approved evidence location, not the 14-column prospecting sheet.
+
+Multiple bound observations for one check conservatively require review rather
+than selecting the newest/last clear result. A recognized, identity-bound adverse
+Phase 1 result takes precedence over clear assertions, even when stale or another
+lookup fails. Unbound or unsupported raw adverse data is not assigned to a person:
+it creates a pending issue. Previously confirmed adverse evidence must therefore
+be retained as its own supported bound envelope; do not replace it with an unknown
+raw provider response. All original observations stay in the trace.
+
+For `channel: email`, intake always adds
+`EMAIL_CROSS_CHANNEL_POLICY_UNRESOLVED` and marks any cross-channel check unresolved.
+This preserves Step 6a's email-selected Dripify skip rule. A synthetic clear flag
+cannot resolve the SOP conflict. Email records remain pending unless a known block
+makes them blocked. Roxy must approve a resolution before a later implementation
+can change this behavior. Do not switch to LinkedIn to escape this pending check
+or any suppression. LinkedIn fixtures can exercise a technically complete handoff;
+they are not proof of production permission or a new routing policy.
+
+### Still unsupported before live integration
+
+- Real HubSpot contact/company identity and association fields, historical bounce
+  coverage, opt-out/subscription scope, sequence enrollment and outreach/reply data.
+- Real Dripify search/membership/campaign schemas, status meanings, pagination and
+  contact-level enrollment completeness. Account campaign lists are insufficient.
+- Verified account permissions, capabilities and source retention limits.
+- Provider-specific normalization and authoritative evidence collection.
+- Approved freshness/expiry, consent, recontact/cooldown and approval-scope policies;
+  trusted reviewers, the evidence/log location and cross-channel SOP resolution.
+
+These require documentation, account-capability verification and approved sanitized
+fixtures in a separately authorized phase. Until then, provider data is unsupported
+and missing policy stays pending. The unchanged evaluator still returns
+`authorized_to_send: false`. Phase 2A cannot authenticate local assertions, prove
+absence, enforce actions elsewhere or prevent concurrent outreach.
