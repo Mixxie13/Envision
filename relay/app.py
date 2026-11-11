@@ -3,12 +3,15 @@ import hmac
 import json
 import os
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from flask import Flask, jsonify, request
 from werkzeug.exceptions import HTTPException
 
 app = Flask(__name__)
+# Preserve Render's existing `gunicorn app` start command (default WSGI name).
+application = app
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024
 
 
@@ -158,3 +161,70 @@ def dripify_leads_search():
         return jsonify(error='Provide nonempty email and/or linkedinUrl strings only'), 400
     return upstream('https://api.dripify.com/v1/open-api/leads/search',
                     'DRIPIFY_API_KEY', {name: value.strip() for name, value in fields.items()})
+
+
+# Read-only expansion verified against the official OpenAPI at api.dripify.com.
+# This is local code until separately deployed; no generic proxy is exposed.
+def dripify_page_query(messages=False):
+    allowed = {'cursor'} if messages else {'cursor', 'limit'}
+    if set(request.args) - allowed or any(len(request.args.getlist(k)) != 1 for k in request.args):
+        return None
+    query = {}
+    if 'cursor' in request.args:
+        cursor = request.args['cursor']
+        if not cursor or len(cursor) > 128 or any(ord(c) < 32 or ord(c) == 127 for c in cursor):
+            return None
+        query['cursor'] = cursor
+    if 'limit' in request.args:
+        value = request.args['limit']
+        if not value.isascii() or not value.isdigit() or len(value) > 3 or not 1 <= int(value) <= 100:
+            return None
+        query['limit'] = value
+    return urllib.parse.urlencode(query)
+
+
+def dripify_read(path, paginated=False, messages=False):
+    if paginated:
+        query = dripify_page_query(messages)
+        if query is None:
+            return jsonify(error='Invalid read pagination parameters'), 400
+    else:
+        if request.args:
+            return jsonify(error='Query parameters are not supported'), 400
+        query = ''
+    return upstream('https://api.dripify.com/v1/open-api/' + path + ('?' + query if query else ''),
+                    'DRIPIFY_API_KEY', {}, method='GET')
+
+
+@app.get('/dripify/leads')
+def dripify_all_visible_leads():
+    # Intentionally unfiltered by campaign; account visibility still needs verification.
+    return dripify_read('leads', paginated=True)
+
+
+@app.get('/dripify/leads/<int:lead_id>')
+def dripify_lead_detail(lead_id):
+    if lead_id > 9223372036854775807:
+        return jsonify(error='Invalid lead identifier'), 400
+    return dripify_read('leads/' + str(lead_id))
+
+
+@app.get('/dripify/leads/<int:lead_id>/activity')
+def dripify_lead_activity(lead_id):
+    if lead_id > 9223372036854775807:
+        return jsonify(error='Invalid lead identifier'), 400
+    return dripify_read('leads/' + str(lead_id) + '/activity', paginated=True)
+
+
+@app.get('/dripify/leads/<int:lead_id>/conversation')
+def dripify_lead_conversation(lead_id):
+    if lead_id > 9223372036854775807:
+        return jsonify(error='Invalid lead identifier'), 400
+    return dripify_read('leads/' + str(lead_id) + '/conversation')
+
+
+@app.get('/dripify/conversations/<conversation_id>/messages')
+def dripify_conversation_messages(conversation_id):
+    if len(conversation_id) > 255 or any(ord(c) < 32 or ord(c) == 127 for c in conversation_id) or conversation_id in ('.', '..'):
+        return jsonify(error='Invalid conversation identifier'), 400
+    return dripify_read('conversations/' + urllib.parse.quote(conversation_id, safe='') + '/messages', paginated=True, messages=True)
