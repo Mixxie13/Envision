@@ -47,7 +47,9 @@ def read_master(path, mapping, sheet=None):
         try:
             if sheet is None and len(book.sheetnames) != 1:
                 raise ValueError('Choose the source worksheet explicitly')
-            all_rows = [list(row) for row in book[sheet or book.sheetnames[0]].values]
+            ws = book[sheet or book.sheetnames[0]]
+            ws.reset_dimensions()
+            all_rows = [list(row) for row in ws.values]
         finally:
             book.close()
     else:
@@ -55,40 +57,65 @@ def read_master(path, mapping, sheet=None):
     if not all_rows:
         raise ValueError('Master is empty')
     headers = [str(v) if v is not None else '' for v in all_rows[0]]
-    if any(not h for h in headers) or len(headers) != len(set(headers)):
-        raise ValueError('Master headers must be nonblank and unique')
-    if not mapping.get('company') or any(v not in headers for v in mapping.values()):
+    special_headers = any(not h for h in headers) or len(headers) != len(set(headers))
+    if not mapping.get('company') or any(headers.count(v) != 1 for v in mapping.values()):
         raise ValueError('Explicit column mapping does not match source headers')
     result = []
     for source_row, values in enumerate(all_rows[1:], 2):
         if not any(v is not None and v != '' for v in values):
             continue
+        if path.suffix.lower() == '.xlsx' and len(values) < len(headers):
+            values = values + [None] * (len(headers)-len(values))
         if len(values) != len(headers):
             raise ValueError('Malformed master row')
         if any(isinstance(v, str) and v.startswith('=') for v in values):
             raise ValueError('Formula cells require a reviewed values-only source')
-        original = dict(zip(headers, values))
+        from datetime import date, time
+        typed_values = []
+        changed_types = False
+        for value in values:
+            if isinstance(value, (datetime, date, time)):
+                typed_values.append(value.isoformat()); changed_types = True
+            else:
+                if isinstance(value, float):
+                    import math
+                    if not math.isfinite(value): raise ValueError('Non-finite source value')
+                typed_values.append(value)
+        original = {h: typed_values[i] for i,h in enumerate(headers) if h and headers.count(h)==1}
         name = original[mapping['company']]
         if not isinstance(name, str) or not name.strip():
             raise ValueError('Every nonempty row needs a company name')
         result.append({'position': len(result) + 1, 'source_row': source_row,
                        'company': name, 'original': original,
                        'mapped': {k: original[v] for k, v in mapping.items()}})
+        if special_headers or changed_types:
+            result[-1]['original_columns'] = [{'column':i+1,'header':headers[i],'value':typed_values[i],
+                'value_type':type(values[i]).__name__} for i in range(len(headers))]
     if not result:
         raise ValueError('No company rows')
     return result
 
 
+class _Connection(sqlite3.Connection):
+    """Allow offline intake to group existing helper writes in one transaction."""
+    _managed = 0
+    def __exit__(self, kind, value, traceback):
+        if self._managed: return False
+        return super().__exit__(kind, value, traceback)
+
+
 class State:
     def __init__(self, directory, readonly=False):
         self.directory = Path(directory)
+        if (self.directory / '.suppression-import-journal.json').exists():
+            raise ValueError('Unfinished suppression import: recover before reading project state')
         if readonly:
-            self.db = sqlite3.connect((self.directory / "state.sqlite").resolve().as_uri() + "?mode=ro", uri=True)
+            self.db = sqlite3.connect((self.directory / "state.sqlite").resolve().as_uri() + "?mode=ro", uri=True, factory=_Connection)
             self.db.row_factory = sqlite3.Row
             self.db.execute("PRAGMA query_only=ON")
             return
         self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-        self.db = sqlite3.connect(self.directory / 'state.sqlite')
+        self.db = sqlite3.connect(self.directory / 'state.sqlite', factory=_Connection)
         self.db.row_factory = sqlite3.Row
         self.db.executescript('''
         CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -100,6 +127,23 @@ class State:
         CREATE TABLE IF NOT EXISTS cache (key TEXT PRIMARY KEY, payload TEXT);
         ''')
         os.chmod(self.directory / 'state.sqlite', 0o600)
+
+    @contextmanager
+    def atomic_intake(self):
+        """Offline writes only. Never wrap a provider dispatch/reservation in this."""
+        name = 'offline_intake_' + str(self.db._managed)
+        self.db.execute('SAVEPOINT ' + name)
+        self.db._managed += 1
+        try:
+            yield
+        except BaseException:
+            self.db.execute('ROLLBACK TO ' + name)
+            self.db.execute('RELEASE ' + name)
+            raise
+        else:
+            self.db.execute('RELEASE ' + name)
+        finally:
+            self.db._managed -= 1
 
     def close(self):
         self.db.close()
@@ -163,6 +207,8 @@ class State:
 
     def contact(self, cid, company_id, payload):
         """Caller IDs are stable; repeated imports cannot erase suppression."""
+        from screening import unproject
+        payload = unproject(payload)
         old = self.db.execute('SELECT payload,company_id FROM contacts WHERE id=?', (cid,)).fetchone()
         if old and old['company_id'] != company_id:
             self.observe(company_id, cid, 'identity', 'pending', {'reason': 'CONTACT_COMPANY_CONFLICT'})
@@ -171,7 +217,13 @@ class State:
             before = json.loads(old['payload'])
             payload = {**before, **payload}
             payload['blocked'] = bool(before.get('blocked') or payload.get('blocked'))
-            payload['risks'] = sorted(set(before.get('risks', []) + payload.get('risks', [])))
+            from screening import adverse, identifiers
+            payload['retained_identifiers'] = sorted(identifiers(before) | identifiers(payload))
+            payload['risks'] = sorted(adverse(before) | set(payload.get('risks', [])))
+            from screening import email, _verified_aliases, RISK_CHECKS
+            if before.get('blocked') or adverse(before).intersection(RISK_CHECKS):
+                payload['retained_suppressed_emails'] = sorted(set(before.get('retained_suppressed_emails', [])) |
+                    ({email(before.get('email'))} - {''}) | _verified_aliases(before))
         # Separate records may refer to one person. Flag collisions across brands,
         # never silently merge by name or discard adverse evidence.
         profile = payload.get('linkedin_url') or ''
@@ -197,7 +249,12 @@ class State:
 
     def contacts(self, company_id=None):
         query = 'SELECT * FROM contacts' + (' WHERE company_id=?' if company_id else '')
-        return [dict(r, data=json.loads(r['payload'])) for r in self.db.execute(query, (company_id,) if company_id else ())]
+        from screening import reconcile
+        # Reconcile account-local retained evidence before company filtering so
+        # suppression cannot disappear across brands, candidate IDs or load order.
+        rows = reconcile([dict(r, data=json.loads(r['payload'])) for r in self.db.execute('SELECT * FROM contacts')],
+                         self.meta('offline-email-suppression-v1'))
+        return [r for r in rows if company_id is None or r['company_id'] == company_id]
 
     def observe(self, company_id, contact_id, stage, state, evidence):
         payload = {'state': state, **evidence}

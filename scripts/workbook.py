@@ -47,6 +47,75 @@ def validate(book):
             raise ValueError('Unexpected Email Confidence label')
 
 
+def populate_review_rows(state, book, clock=None):
+    """Research-review rows only, after current identity and complete duplicate checks.
+
+    No provisional, suppressed or provider-only email is silently promoted. Detailed
+    eligibility remains in linked evidence; no row is permission to send.
+    """
+    from candidate_handoff import review
+    from contact_research import role_rank
+    links=state.meta('managed_prospect_rows', {})
+    sheet=book['New Prospect Contacts']
+    for company in state.companies():
+        people=sorted(state.contacts(company['id']),key=lambda c:role_rank(c['data'].get('role','')))
+        written=0
+        for contact in people:
+            person=contact['data']
+            if not person.get('handoff') or person.get('blocked'): continue
+            view=review(person,contact['id'],company['data']['company'],clock)
+            if not (view['confirmed_current_employment'] and view['hubspot_status']=='absent' and view['dripify_status']=='absent'):continue
+            address=person.get('email') or ''
+            if address and not view['person_linked_email_candidate']:continue
+            confidence=CONFIDENCE[0] if address else CONFIDENCE[-1]
+            sources=view['employment_assessment']['sources']
+            row=[company['batch'],company['data']['company'],'',company['data']['mapped'].get('priority',company['position']),
+                person['name'],person['role'],person.get('function') or person['role'],address,confidence,
+                person.get('linkedin_url'),sources[0]['url'] if sources else '',
+                view['linked_email_evidence'][0]['source_url'] if address else '',
+                'Research review only; see linked eligibility evidence; not campaign authorization',
+                view['employment_assessment']['confirmed_as_of']]
+            values=[None if v == '' else safe(v) for v in row]
+            linked=links.get(contact['id'])
+            if linked and linked['row'] <= sheet.max_row:
+                current=list(next(sheet.iter_rows(min_row=linked['row'],max_row=linked['row'],values_only=True)))
+                if current != linked['values']:
+                    state.observe(company['id'],contact['id'],'prospect-review','pending',{'name':person['name'],'role':person['role'],
+                        'linkedin_url':person.get('linkedin_url'),'reason':'MANUAL_PROSPECT_ROW_EDIT_REQUIRES_RECONCILIATION'})
+                    continue
+                for column,value in enumerate(values,1):sheet.cell(linked['row'],column).value=value
+            else:
+                # Do not duplicate an independently populated row with the same exact profile/company.
+                existing=[r for r in list(sheet.values)[1:] if r[1]==values[1] and r[4]==values[4] and r[9]==values[9]]
+                if existing:continue
+                append(sheet,row)
+                links[contact['id']]={'row':sheet.max_row,'values':values,'company_row_id':company['id']}
+            if contact['id'] in links:links[contact['id']]['values']=values
+            written+=1
+            if written>=5:break
+    state.set_meta('managed_prospect_rows',links)
+
+
+def polish(book):
+    """Readable review output; no sorting, filtering-out rows or schema changes."""
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+    for sheet in book:
+        sheet.freeze_panes = 'A2'
+        sheet.auto_filter.ref = sheet.dimensions
+        sheet.sheet_view.showGridLines = False
+        for cell in sheet[1]:
+            cell.font = Font(bold=True, color='FFFFFF')
+            cell.fill = PatternFill('solid', fgColor='203864')
+            cell.alignment = Alignment(wrap_text=True, vertical='center')
+        sheet.row_dimensions[1].height = 32
+        for column in sheet.columns:
+            sample = [len(str(c.value or '')) for c in list(column)[:100]]
+            width = min(65, max(14, max(sample, default=14) + 2))
+            sheet.column_dimensions[get_column_letter(column[0].column)].width = width
+            for cell in column[1:]: cell.alignment = Alignment(vertical='top', wrap_text=True)
+
+
 def update(state, path, clock=None):
     """Project lock must be held. IDs in evidence/notes make repeat runs idempotent."""
     path = Path(path)
@@ -61,16 +130,45 @@ def update(state, path, clock=None):
             book.create_sheet(name).append(header)
     validate(book)
     company_rows = {c['id']: c for c in state.companies()}
+    from screening import project
+    # Assessment time is not provider observation time. This records the same
+    # fail-closed projection used by the runner and whole-list tracker.
+    from datetime import datetime, timezone
+    screening_clock = clock or datetime.now(timezone.utc)
+    from candidate_handoff import refresh
+    refresh(state, clock=screening_clock)
+    for contact in state.contacts():
+        person = contact['data']; company = company_rows[contact['company_id']]
+        if person.get('handoff'): continue  # Already has the shared named review observation.
+        screen = project(person, contact['id'], company['data']['company'], screening_clock)
+        stable = {k: screen[k] for k in ('decision', 'technical_eligibility', 'reason_codes',
+                  'hubspot_status', 'dripify_status', 'campaign_ready', 'suppression_sources')}
+        state.observe(contact['company_id'], contact['id'], 'screening', screen['decision'], {
+            'name': person.get('name'), 'role': person.get('role'), 'linkedin_url': person.get('linkedin_url'),
+            'reason': 'SUPPRESSION_SCREENING_' + screen['decision'].upper(),
+            'evidence_record_id': contact['id'], 'source_url': person.get('source'),
+            'pending_reasons': screen['reason_codes'], 'screening': stable,
+            'provider_evidence_dates': screen['evidence_dates'],
+            'provider_reviews': person.get('handoff', person).get('provider_reviews', {})})
+    registry = state.meta('offline-email-suppression-v1', {})
+    for source_hash, source in registry.get('sources', {}).items():
+        marker = 'AUTO-SUPPRESSION-' + source_hash
+        if not any(row[0] == marker for row in list(book['Batch Summary'].values)[1:]):
+            append(book['Batch Summary'], [marker, 'Offline suppression list', 'Source rows / unique blocked emails',
+                str(source['data_rows']) + ' / ' + str(source['unique_emails']),
+                'Designated-list evidence only; reasons/dates/filter missing; no absence or subscription clearance',
+                'Source SHA256 ' + source_hash + '; imported_at is not a bounce date'])
     # Preserve existing company rows and values. New workbooks preserve all original categories.
     for company in state.companies():
         p = company['position']
         data = company['data']
         if book['Company Research'].max_row >= p + 1:
-            if book['Company Research'].cell(p + 1, 1).value != data['company']:
+            if book['Company Research'].cell(p + 1, 1).value != safe(data['company']):
                 raise ValueError('Workbook company order differs from master')
             continue
         m = data['mapped']
         append(book['Company Research'], [data['company'], m.get('priority', p), m.get('category', ''), m.get('price_tier', ''), m.get('website', ''), '', '', '', None, 'N/A', '', None, 'N/A', 'Pending evidence', '', '', 'Source row ' + str(data['source_row']) + '; original fields retained in project state'])
+    populate_review_rows(state,book,clock)
     # Repair earlier AUTO issue rows without deleting historical reasons or changing schema.
     observations = {'AUTO-' + o['id'][:24]: o for o in state.observations()}
     contacts = {c['id']: c['data'] for c in state.contacts()}
@@ -100,12 +198,12 @@ def update(state, path, clock=None):
         append(book['Verification Evidence'], [evidence_id, company['data']['company'], payload.get('name', ''), obs['stage'], result,
             payload.get('source_url') or str(state.directory / 'state.sqlite'), payload.get('observed_at', ''), 'Reusable read-only workflow', payload.get('state'), '',
             payload.get('employment_status', 'Current employment not established by automation'), 'No absence/permission inferred',
-            json.dumps({'record_id': payload.get('evidence_record_id'), 'review_states': payload.get('review_states'), 'provenance': payload.get('provenance'), 'email_evidence': payload.get('email_evidence'), 'pending_reasons': payload.get('pending_reasons')}, ensure_ascii=False) if payload.get('review_states') else 'Retained immutable observation ' + obs['id']])
+            json.dumps({'record_id': payload.get('evidence_record_id'), 'review_states': payload.get('review_states'), 'provenance': payload.get('provenance'), 'email_evidence': payload.get('email_evidence'), 'pending_reasons': payload.get('pending_reasons'), 'screening': payload.get('screening'), 'provider_evidence_dates': payload.get('provider_evidence_dates'), 'provider_reviews': payload.get('provider_reviews')}, ensure_ascii=False) if payload.get('review_states') or payload.get('screening') else 'Retained immutable observation ' + obs['id']])
         evidence_ids.add(evidence_id)
         if payload.get('state') in ('pending', 'blocked'):
             marker = '[' + evidence_id + '] ' + str(result)
             if '[' + evidence_id + ']' not in issue_markers:
-                contact = next((c['data'] for c in state.contacts(company['id']) if c['id'] == obs['contact_id']), {})
+                contact = contacts.get(obs['contact_id'], {})
                 details = json.dumps({'record_id': payload.get('evidence_record_id') or obs['contact_id'],
                                       'source_url': payload.get('source_url') or contact.get('source'),
                                       'pending_reasons': payload.get('pending_reasons', [])}, ensure_ascii=False)
@@ -127,8 +225,7 @@ def update(state, path, clock=None):
                 cell = book['Existing HubSpot Contacts'].cell(existing[cid], 13)
                 if 'AUTO: retained block' not in str(cell.value):
                     cell.value = str(cell.value or '') + '; AUTO: retained block; no clearance'
-        # New-prospect rows are deliberately not fabricated from name-only candidates.
-        # Until duplicate coverage is supported, every such candidate remains in evidence/state.
+        # Provisional and incomplete-coverage candidates remain supporting evidence.
     marker = 'AUTO-PROJECT-' + state.meta('project_id')
     summary = book['Batch Summary']
     values = [marker, 'Original company list', 'Companies / contacts / blocked',
@@ -159,6 +256,7 @@ def update(state, path, clock=None):
             for column, item in enumerate(row, 1): summary.cell(index, column).value = safe(item)
         else: append(summary, row)
     validate(book)
+    polish(book)
     fd, temporary = tempfile.mkstemp(suffix='.xlsx', dir=path.parent)
     os.close(fd)
     try:

@@ -9,7 +9,7 @@ import json
 from sourcing_state import digest
 from research import public_url, relevant_role
 from reconcile_exports import linkedin
-from employment import assess as assess_employment, normalized
+from employment import assess as assess_employment, normalized, small_company_fallback
 from evidence import assemble
 from eligibility import evaluate, timestamp
 
@@ -18,9 +18,10 @@ SCHEMA = 'envision.candidate-handoff.v1'
 
 def resolve_company(state, row, batch=None):
     if not isinstance(row, dict): raise ValueError('Candidate object required')
-    for field in ('employment_claims','email_evidence','envelopes'):
+    for field in ('employment_claims','email_evidence','envelopes','fact_resolutions'):
         if field in row and (not isinstance(row[field], list) or any(not isinstance(v, dict) for v in row[field])):
             raise ValueError('Structured evidence lists required')
+    if 'small_company_fallback' in row and not isinstance(row['small_company_fallback'], dict): raise ValueError('Structured fallback research evidence required')
     if 'approvals' in row and not isinstance(row['approvals'], dict): raise ValueError('Approval object required')
     choices = [c for c in state.companies(batch) if c['data']['company'] == row.get('company')]
     if row.get('company_row_id'):
@@ -49,10 +50,11 @@ def _source_key(row):
 
 def reconcile_id(state, company, row):
     """Stable source observations or explicit IDs, never name-only identity merges."""
-    contacts = [c for c in state.contacts(company['id']) if c['data'].get('handoff')]
+    all_contacts = state.contacts(company['id'])
+    contacts = [c for c in all_contacts if c['data'].get('handoff')]
     explicit = row.get('candidate_record_id')
     if explicit:
-        target = next((c for c in contacts if c['id'] == explicit), None)
+        target = next((c for c in all_contacts if c['id'] == explicit), None)
         if not target or normalized(target['data']['name']) != normalized(row['name']):
             raise ValueError('Explicit candidate identity requires manual review')
         return explicit
@@ -77,19 +79,6 @@ def validate_rows(state, rows, batch=None):
     return planned
 
 
-def _retain_bounces(state, person, cid):
-    address = str(person.get('email') or '').strip().casefold()
-    for other in state.contacts():
-        data = other['data']
-        bounced = ('HISTORICAL_HARD_BOUNCE' in data.get('risks', []) or
-                   data.get('evidence_record', {}).get('checks', {}).get('hard_bounce', {}).get('result') == 'bounced')
-        if address and str(data.get('email') or '').strip().casefold() == address and bounced:
-            person['blocked'] = True
-            person['risks'] = sorted(set(person.get('risks', []) + ['HISTORICAL_HARD_BOUNCE']))
-            refs = person.setdefault('retained_bounce_sources', [])
-            person['retained_bounce_sources'] = sorted(set(refs + [other['id']]))
-
-
 def _date_valid(value):
     try:
         datetime.fromisoformat(value.replace('Z', '+00:00'))
@@ -102,6 +91,21 @@ def _build(person, contact_id, company, clock):
     packet = person['handoff']
     facts = packet['facts']
     risks = set(person.get('risks', []))
+    # Explicit research-QC supersession can retire incomplete discovery metadata,
+    # never native suppression or identity restrictions. Original facts remain.
+    identity_conflict = any(any(t in r for t in ('AMBIGUOUS','IDENTITY_CONFLICT','IDENTITY_COLLISION')) for r in risks)
+    verified_claims = {digest(c): c for c in packet['employment_claims'] if assess_employment(
+        {**person,'company':company,'identity_conflict':identity_conflict},[c],clock.isoformat())['current_employment_confirmed']}
+    retired = set()
+    for resolution in packet.get('fact_resolutions', []):
+        claim = verified_claims.get(resolution.get('superseding_claim_id'))
+        try:
+            valid = (claim and resolution.get('reviewer_role') == 'lead_sourcing_owner' and
+                resolution.get('resolution') == 'superseded' and resolution.get('evidence_ref') == claim['source_url'] and
+                timestamp(resolution.get('reviewed_at')) <= clock)
+        except (ValueError,TypeError): valid=False
+        if valid:retired.add(resolution.get('fact_id'))
+    facts = [f for f in facts if digest(f) not in retired]
     subject = {'contact_id': contact_id, 'company': company, 'full_name': person['name'],
                'linkedin_url': person.get('linkedin_url') or '', 'email': person.get('email') or ''}
     for fact in facts:
@@ -156,15 +160,18 @@ def review(person, contact_id, company, clock=None):
     verified = bool(linked and
                     any(e['email'] == subject_email(record) for e in linked) and supported_checks(effective, contact_id, company, clock,
                             {'professional_email': 'individual', 'verification': 'valid'}))
-    result = evaluate(record, now=clock)
+    from screening import enforce, decision
+    record = enforce(person, record)
+    result = decision(person, record, clock)
     if person.get('blocked') and result['decision'] != 'blocked':
         result['decision'] = result['technical_eligibility'] = 'blocked'
         result['reason_codes'].append('RETAINED_BASELINE_BLOCK')
-    role_supported = relevant_role(person.get('role', '')) and not any(r in record['unresolved_risks'] for r in ('PARENT_OR_COMPANY_ATTRIBUTION_UNRESOLVED', 'CONFLICTING_ROLE_EVIDENCE'))
+    allowed_role = relevant_role(person.get('role', ''),small_company_fallback({**person,'company':company},clock))
+    role_supported = allowed_role and not any(r in record['unresolved_risks'] for r in ('PARENT_OR_COMPANY_ATTRIBUTION_UNRESOLVED', 'CONFLICTING_ROLE_EVIDENCE'))
     def provider_status(check):
         result = record['checks'].get(check, {}).get('result')
-        return result if result and supported_checks(effective, contact_id, company, clock, {check: result}) else 'pending'
-    return {'discovered_candidate': relevant_role(person.get('role', '')),
+        return result if result == 'absent' and not record['unresolved_risks'] and supported_checks(effective, contact_id, company, clock, {check: result}) else 'pending'
+    return {'discovered_candidate': allowed_role,
             'provisional_role_evidence': bool(role_supported and not current),
             'confirmed_current_employment': bool(current), 'person_linked_email_candidate': bool(linked),
             'deliverability_verified_email': verified, 'outreach_eligibility': result['decision'],
@@ -184,6 +191,11 @@ def _unique(values):
 
 
 def ingest(state, rows, batch=None, clock=None):
+    with state.atomic_intake():
+        return _ingest(state, rows, batch, clock)
+
+
+def _ingest(state, rows, batch=None, clock=None):
     clock = clock or datetime.now(timezone.utc)
     planned = validate_rows(state, rows, batch)
     identifiers = []
@@ -193,25 +205,24 @@ def ingest(state, rows, batch=None, clock=None):
         packet = deepcopy(old.get('handoff', {'schema': SCHEMA, 'facts': [], 'employment_claims': [], 'envelopes': [], 'email_evidence': []}))
         fact = {k: row.get(k) for k in ('company', 'name', 'job_title', 'employer_attribution', 'linkedin_url', 'original_source_url', 'source_reference', 'evidence_date', 'research_date', 'stale')}
         packet['facts'] = _unique(packet['facts'] + [fact])
-        for field in ('employment_claims', 'envelopes', 'email_evidence'):
-            packet[field] = _unique(packet[field] + deepcopy(row.get(field, [])))
+        for field in ('employment_claims', 'envelopes', 'email_evidence','fact_resolutions'):
+            packet[field] = _unique(packet.get(field, []) + deepcopy(row.get(field, [])))
+        if 'small_company_fallback' in row: packet['small_company_fallback'] = deepcopy(row['small_company_fallback'])
         packet['channel'] = row.get('channel', packet.get('channel'))
         packet['approvals'] = {**packet.get('approvals', {}), **row.get('approvals', {})}
         profile = linkedin(row.get('linkedin_url') or old.get('linkedin_url'))
         known = [c['data'] for c in state.contacts() if c['id'] != cid and profile and linkedin(c['data'].get('linkedin_url')) == profile]
         risks = set(old.get('risks', []))
         for other in known:
-            risks.update(other.get('risks', []))
             if normalized(other.get('name')) != normalized(row['name']): risks.add('IDENTITY_CONFLICT')
         person = {**old, 'name': row['name'].strip(), 'role': row['job_title'].strip(),
                   'linkedin_url': 'https://' + profile if profile else '',
                   'employer_attribution': row['employer_attribution'], 'email': row.get('email', old.get('email', '')),
                   'source': row.get('original_source_url') or row.get('source_reference') or 'Manual candidate; original source pending',
-                  'blocked': bool(old.get('blocked') or any(k.get('blocked') for k in known)),
+                  'blocked': bool(old.get('blocked')),
                   'risks': sorted(risks), 'handoff': packet, 'current_employment_confirmed': False, 'outreach_ready': False}
         if old.get('linkedin_url') and profile and linkedin(old['linkedin_url']) != profile:
             person['risks'] = sorted(set(person['risks'] + ['IDENTITY_CONFLICT_PROFILE_CORRECTION_REQUIRES_REVIEW']))
-        _retain_bounces(state, person, cid)
         state.contact(cid, company['id'], person)
         # State may add identity-collision risks; assess the stored record, not a stale copy.
         person = next(c['data'] for c in state.contacts(company['id']) if c['id'] == cid)
@@ -236,17 +247,22 @@ def provider_review(state, company_id, result, provider, clock=None):
     contacts = {c['id']: c for c in state.contacts(company_id)}
     for item in result.get('contacts', []):
         contact = contacts.get(item.get('contact_id'))
-        if not contact or not contact['data'].get('handoff'): continue
+        if not contact: continue
         person = contact['data']
-        packet = person['handoff']
+        packet = person['handoff'] if person.get('handoff') else person
         notes = packet.setdefault('provider_reviews', {}).setdefault(provider, [])
         note = {'reviewed_at': clock.isoformat(), 'reason': item.get('reason') or result.get('reason'),
                 'positive_match': bool(item.get('matches') or item.get('retained_exact_matches')),
-                'previous_outreach_confirmed': item.get('previous_outreach_confirmed') is True,
+                'previous_outreach_confirmed': item.get('previous_outreach_confirmed') is True or any(
+                    n.get('previous_outreach_confirmed') is True for n in notes),
+                'identity_conflict': item.get('identity_conflict') is True or any(n.get('identity_conflict') is True for n in notes),
+                'invitation_conflict': item.get('invitation_conflict') is True or any(n.get('invitation_conflict') is True for n in notes),
                 'coverage_complete': False}
         packet['provider_reviews'][provider] = _unique(notes + [note])
-        if note['positive_match'] or note['previous_outreach_confirmed']:
+        if note['positive_match'] or note['previous_outreach_confirmed'] or note['invitation_conflict']:
             person['risks'] = sorted(set(person.get('risks', []) + ['EXISTING_OR_PREVIOUS_OUTREACH_REQUIRES_REVIEW']))
+        if note['identity_conflict']:
+            person['risks'] = sorted(set(person.get('risks', []) + ['IDENTITY_CONFLICT_PROVIDER_HISTORY']))
         state.contact(contact['id'], company_id, person)
 
 
@@ -259,11 +275,8 @@ def refresh(state, clock=None, company_id=None):
         profile = linkedin(person.get('linkedin_url'))
         others = [c['data'] for c in state.contacts() if c['id'] != contact['id'] and profile and linkedin(c['data'].get('linkedin_url')) == profile]
         for other in others:
-            person['blocked'] = bool(person.get('blocked') or other.get('blocked'))
-            person['risks'] = sorted(set(person.get('risks', []) + other.get('risks', [])))
             if normalized(other.get('name')) != normalized(person['name']):
                 person['risks'] = sorted(set(person['risks'] + ['IDENTITY_CONFLICT']))
-        _retain_bounces(state, person, contact['id'])
         company = next(c for c in state.companies() if c['id'] == contact['company_id'])
         view = review(person, contact['id'], company['data']['company'], clock)
         person['evidence_record'] = view['record']
@@ -277,3 +290,33 @@ def refresh(state, clock=None, company_id=None):
              'observed_at':fact.get('research_date'),'employment_status':view['employment_assessment']['status'],
              'review_states':states,'email_evidence':view['linked_email_evidence'],
              'evidence_record_id':contact['id'],'provenance':person['handoff']['facts'],'pending_reasons':view['eligibility_assessment']['reason_codes']})
+
+
+def adopt_existing(state, company_id=None, clock=None):
+    """Promote existing named discovery records into packets without new identities.
+
+    Raw CRM contacts stay CRM evidence. Unknown dates, attribution and public-source
+    claims remain pending; nothing here confirms employment or mailbox ownership.
+    """
+    changed = []
+    companies = {c['id']: c for c in state.companies()}
+    from contact_research import NAME, BAD_NAMES
+    for contact in state.contacts(company_id):
+        person = contact['data']
+        if person.get('handoff') or person.get('hubspot_contact_id') or person.get('research_excluded'):
+            continue
+        name, role = person.get('name'), person.get('role')
+        if not isinstance(name, str) or not NAME.fullmatch(name) or BAD_NAMES.search(name) or not relevant_role(role or ''):
+            continue
+        company = companies[contact['company_id']]
+        source = person.get('source_url') or person.get('source')
+        row = {'company': company['data']['company'], 'company_row_id': company['id'],
+            'candidate_record_id': contact['id'], 'name': name, 'job_title': role,
+            'employer_attribution': person.get('employer_attribution') or company['data']['company'],
+            'linkedin_url': person.get('linkedin_url'), 'email': person.get('email') or '',
+            'original_source_url': source if isinstance(source, str) and public_url(source) else None,
+            'source_reference': person.get('source') if isinstance(person.get('source'), str) else 'Retained discovery record: ' + contact['id'],
+            'evidence_date': person.get('publication_date') or person.get('evidence_date'),
+            'research_date': person.get('observed_at') or person.get('research_date')}
+        changed += ingest(state, [row], clock=clock)
+    return changed

@@ -88,8 +88,9 @@ Coverage probes, performed read-only and without changing scopes:
 
 No full email/reply-event history, complete historical bounce audit, subscription
 clearance, contact freshness policy or cross-channel Dripify check is established
-by these reads. The unchanged offline evaluator and role-approval mismatch retain
-their existing limits; no contact is cleared or sent. No paid providers are called.
+by these reads. The current approval contract separates Lead Sourcing Owner QC
+from Bridget final approval; historical Roxy records confer no current authority.
+The evaluator still fails closed; no contact is cleared or sent by these reads.
 
 Run offline checks with `python3 -B -m unittest discover -s tests -v`.
 Tests use synthetic credentials and mocked transport; never production fixtures.

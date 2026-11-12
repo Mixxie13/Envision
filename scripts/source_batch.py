@@ -1,4 +1,4 @@
-"""Resumable Envision research batches. No paid or external-write operations."""
+"""Resumable research batches. No CRM writes/sends; guarded email operations opt in."""
 import argparse
 import hashlib
 import json
@@ -13,63 +13,35 @@ from public_search import OfficialSiteSearch, BraveSearch
 from urllib.parse import urlparse
 from sourcing_state import State, digest, now, project_lock, read_master
 from workbook import update
-from master_progress import write_reports
+from master_progress import write_reports, atomic_text
 
 STAGES = ('hubspot', 'research', 'identity', 'dripify', 'email', 'evaluation')
 
 
-def evaluate_contacts(state, company):
+def evaluate_contacts(state, company, clock=None):
     results = []
     for row in state.contacts(company['id']):
         person = row['data']
-        if person.get('handoff'):
-            from candidate_handoff import review
-            result = review(person, row['id'], company['data']['company'])['eligibility_assessment']
-            results.append({**result, 'contact_id': row['id']})
-            continue
-        subject = {'contact_id': row['id'], 'company': company['data']['company'],
-                   'full_name': person.get('name') or '', 'email': person.get('email') or '',
-                   'linkedin_url': person.get('linkedin_url') or ''}
-        checks = {}
-        if person.get('blocked'):
-            # Existing known suppression is never cleared by incomplete providers.
-            mapping = {'HISTORICAL_HARD_BOUNCE': ('hard_bounce', 'bounced'),
-                       'EMAIL_OPT_OUT': ('opt_out', 'opted_out'),
-                       'ACTIVE_SEQUENCE': ('hubspot_sequence', 'active')}
-            for reason in person.get('risks', []):
-                if reason in mapping:
-                    check, result = mapping[reason]
-                    checks[check] = {'result': result, 'subject': subject,
-                                     'source': person.get('source', 'Retained adverse CRM observation'),
-                                     'complete': False, 'state': 'unresolved'}
-        record = {'subject': subject, 'channel': person.get('channel'), 'checks': checks,
-                  'unresolved_risks': ['SOURCE_COVERAGE_AND_POLICY_UNRESOLVED'] + person.get('risks', []),
-                  'approvals': {}}
-        result = eligibility.evaluate(record)
-        if person.get('blocked') and result['decision'] != 'blocked':
-            result['decision'] = 'blocked'
-            result['technical_eligibility'] = 'blocked'
-            result['reason_codes'].append('RETAINED_BASELINE_BLOCK')
-        result['contact_id'] = row['id']
-        results.append(result)
+        from screening import project
+        results.append(project(person, row['id'], company['data']['company'],clock))
     return {'state': 'blocked' if any(r['decision'] == 'blocked' for r in results) else 'pending',
             'reason': 'RESEARCH_REVIEW_ONLY_NOT_OUTREACH_CLEARANCE', 'contacts': results,
             'approval_policy': 'Lead Sourcing Owner research/QC review, then Bridget final approval; historical Roxy records never satisfy current review'}
 
 
-def run(state, batch, workbook, providers=None, researcher=None, public_web=False):
+def run(state, batch, workbook, providers=None, researcher=None, public_web=False, email_runner=None, public_fetch=None, allow_search_api=False, clock=None):
     state.permit_batch(batch)
     providers = providers or Providers(state)
     custom_researcher = researcher is not None
-    researcher = researcher or PublicResearch()
-    searcher = OfficialSiteSearch()
+    researcher = researcher or PublicResearch(fetch=public_fetch)
+    searcher = OfficialSiteSearch(fetch=public_fetch)
     authorization = state.meta('public_search_authorization', {})
-    approved_search = BraveSearch(approved=bool(authorization.get('provider') == 'brave' and authorization.get('approved') is True and authorization.get('evidence_ref')),
+    approved_search = BraveSearch(approved=bool(allow_search_api and authorization.get('provider') == 'brave' and authorization.get('approved') is True and authorization.get('evidence_ref')),
                                   max_queries=authorization.get('max_queries', 0))
     completed, reused = 0, 0
     for company in state.companies(batch):
         for stage in STAGES:
-            if state.job(company['id'], stage):
+            if state.job(company['id'], stage) and not (stage == 'email' and email_runner is not None and email_runner.enabled):
                 reused += 1
                 continue
             state.cache_revision = state.meta('revision:' + company['id'] + ':' + stage, '')
@@ -108,7 +80,7 @@ def run(state, batch, workbook, providers=None, researcher=None, public_web=Fals
                                 sources.append({'url': url, 'authority': 'official' if (urlparse(url).hostname or '').removeprefix('www.') == site_host else 'corroborating'})
                         cached_urls = {p['url'] for p in cached_pages if p.get('state') == 'observed'}
                         sources.sort(key=lambda source: source['url'] in cached_urls)
-                        result = state.cached(['decision-maker-research-v4', company['id'], digest(sources)], lambda: DecisionMakerResearch().collect(website, company['data']['company'], known, sources, cached_pages))
+                        result = state.cached(['decision-maker-research-v4', company['id'], digest(sources)], lambda: DecisionMakerResearch(fetch=public_fetch).collect(website, company['data']['company'], known, sources, cached_pages))
                         for claim in result.get('candidates', []):
                             matching = [c for c in state.contacts(company['id']) if c['data'].get('name', '').casefold() == claim['name'].casefold()]
                             state.observe(company['id'], matching[0]['id'] if len(matching) == 1 else '', 'publication-claim', 'pending',
@@ -131,10 +103,13 @@ def run(state, batch, workbook, providers=None, researcher=None, public_web=Fals
                                           {**person, 'source': page['url'], 'blocked': False,
                                            'risks': ['PROVISIONAL_PUBLICATION_NOT_EMPLOYMENT_CONFIRMATION']})
                 elif stage == 'email':
-                    result = {'state': 'pending', 'reason': 'PAID_DISCOVERY_AND_VERIFICATION_DISABLED',
-                              'note': 'No Apollo, Findymail or NeverBounce paid call exists in this runner. Published mailto observations are not verified addresses.'}
+                    from email_workflow import EmailOperations
+                    result = (email_runner or EmailOperations(state)).collect(company)
                 else:
-                    result = evaluate_contacts(state, company)
+                    result = evaluate_contacts(state, company,clock)
+                if stage == 'research':
+                    from candidate_handoff import adopt_existing
+                    adopt_existing(state, company['id'],clock)
                 result = {**result, 'observed_at': result.get('observed_at') or now()}
             except Exception:
                 # Do not print exception text, credentials or raw provider bodies.
@@ -143,7 +118,7 @@ def run(state, batch, workbook, providers=None, researcher=None, public_web=Fals
             state.finish(company['id'], stage, result['state'])
             completed += 1
         # Durable per-company checkpoint, including when another company fails.
-        update(state, workbook)
+        update(state, workbook,clock)
     batch_company_ids = {c['id'] for c in state.companies(batch)}
     batch_contacts = [c for c in state.contacts() if c['company_id'] in batch_company_ids]
     report = {'project_id': state.meta('project_id'), 'batch': batch,
@@ -152,13 +127,13 @@ def run(state, batch, workbook, providers=None, researcher=None, public_web=Fals
               'research_excluded_records': sum(bool(c['data'].get('research_excluded')) for c in batch_contacts),
               'active_research_records': sum(not c['data'].get('research_excluded') for c in batch_contacts),
               'retained_blocks': sum(bool(c['data'].get('blocked')) for c in batch_contacts),
-              'outreach_cleared': 0, 'paid_calls': 0, 'crm_write_calls': 0,
+              'outreach_cleared': 0, 'paid_calls': email_runner.attempts if email_runner is not None else 0, 'crm_write_calls': 0,
               'batch_status': 'research_attempted_review_required',
               'master_processing_authorized': False,
-              'limitations': ['Account-wide Dripify history unavailable',
+              'limitations': ['Dripify read/history retrieval exists; complete account/owner/retention coverage unverified',
                               'Public source discovery is bounded; Apollo access/schema and independent employment coverage require verification',
                               'Current employment, subscription/sequence history and freshness pending',
-                              'No automatic approval or new-prospect classification']}
+                              'Research-review rows require current evidence and duplicate coverage; no automatic approval']}
     exceptions = []
     for row in batch_contacts:
         person = row['data']
@@ -171,10 +146,10 @@ def run(state, batch, workbook, providers=None, researcher=None, public_web=Fals
                            'action': 'Continue independent research; manual evidence only when automated source unavailable and needed',
                            'outreach_ready': False})
     exception_path = state.directory / ('batch-' + str(batch) + '-exceptions.json')
-    exception_path.write_text(json.dumps(exceptions, indent=2))
+    atomic_text(exception_path, json.dumps(exceptions, indent=2))
     exception_path.chmod(0o600)
     path = state.directory / ('batch-' + str(batch) + '-report.json')
-    path.write_text(json.dumps(report, indent=2))
+    atomic_text(path, json.dumps(report, indent=2))
     path.chmod(0o600)
     write_reports(state)
     return report

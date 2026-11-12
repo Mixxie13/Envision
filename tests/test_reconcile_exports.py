@@ -102,5 +102,34 @@ class ReconciliationTests(unittest.TestCase):
             self.assertEqual(source.read_text(), original)
 
 
+class SuppressionExportSafetyTests(unittest.TestCase):
+    setUp = ReconciliationTests.setUp
+    result = ReconciliationTests.result
+
+    def test_email_case_and_whitespace_do_not_create_false_identity_conflicts(self):
+        row=dict(self.row,email=' PERSON@EXAMPLE.TEST ')
+        self.assertNotIn('Ambiguous',self.result(row)['flags'])
+
+    def test_same_bounced_email_different_ids_remains_blocked_and_ambiguous(self):
+        result=self.result(dict(self.row,hubspot_contact_id='different',email='PERSON@example.test',hard_bounce='true'))
+        self.assertIn('Blocked',result['flags']); self.assertIn('Ambiguous',result['flags'])
+        self.assertEqual(result['suppression_status'],'blocked')
+
+    def test_same_contact_conflicting_profile_keeps_optout_block(self):
+        result=self.result(dict(self.row,linkedin_url='https://linkedin.com/in/different',opt_out='true'))
+        self.assertEqual(result['classification'],'Blocked'); self.assertIn('Ambiguous',result['flags'])
+
+    def test_unbound_adverse_export_is_not_merged_into_different_person(self):
+        result=self.result(dict(self.row,hubspot_contact_id='different',email='unrelated@example.test',hard_bounce='true'))
+        self.assertEqual(result['classification'],'Ambiguous')
+        self.assertEqual(result['suppression_status'],'pending')
+
+    def test_claimed_complete_sources_do_not_establish_subscription_clearance(self):
+        result=self.result(self.row,dict(self.row,source='dripify',linkedin_url=self.contact['linkedin_url']))
+        self.assertEqual(result['complete_sources_claimed'],['dripify','hubspot'])
+        self.assertEqual(result['subscription_clearance'],'pending')
+        self.assertEqual(result['activity_coverage'],'pending'); self.assertFalse(result['outreach_ready'])
+
+
 if __name__ == '__main__':
     unittest.main()

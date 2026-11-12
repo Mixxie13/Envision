@@ -111,8 +111,9 @@ class Collector:
     No TTL is invented: cached observations stay dated and cannot clear outreach.
     Caller must hold the project's existing single-writer lock.
     """
-    def __init__(self, state, fetch=read, max_requests=12, max_pages=2):
+    def __init__(self, state, fetch=read, max_requests=12, max_pages=2, before_request=None):
         self.state, self.fetch = state, fetch
+        self.before_request = before_request
         self.remaining, self.max_pages = max_requests, max_pages
         self.requests = 0
         self.visited = set()
@@ -121,6 +122,7 @@ class Collector:
     def _read(self, path, query=None):
         if self.remaining <= 0:
             raise ReadFailure('RUN_REQUEST_BUDGET_REACHED')
+        if self.before_request is not None: self.before_request()
         self.remaining -= 1
         self.requests += 1
         import time
@@ -170,8 +172,7 @@ class Collector:
                 if path == 'leads' and any(not str(r.get('id', '')).isdigit() for r in rows):
                     raise ReadFailure('UNEXPECTED_LEAD_ID')
                 nxt = data.get('nextCursor')
-                if nxt is not None and (not isinstance(nxt, str) or not nxt or len(nxt) > 128 or nxt == cursor or nxt in result['seen_cursors']):
-                    raise ReadFailure('INVALID_OR_REPEATED_CURSOR')
+                invalid_cursor = nxt is not None and (not isinstance(nxt, str) or not nxt or len(nxt) > 128 or nxt == cursor or nxt in result['seen_cursors'])
                 # Keep event metadata, not message text/attachments.
                 if messages:
                     rows = [{k: r[k] for k in ('eventId', 'createdAt', 'type', 'direction', 'senderType') if k in r} for r in rows]
@@ -189,6 +190,10 @@ class Collector:
                         existing.add(rid)
                 result['items'].extend(fresh)
                 result['pages'].append({'observed_at': now(), 'count': len(rows), 'has_next_cursor': nxt is not None})
+                if invalid_cursor:
+                    # Valid positive items survive a bad continuation token; the
+                    # snapshot stalls and cannot support a negative conclusion.
+                    raise ReadFailure('INVALID_OR_REPEATED_CURSOR')
                 if overlap:
                     # Preserve positives; changed page boundaries prevent completeness.
                     result['reason'] = 'OVERLAPPING_OR_CHANGED_RESULT_SET'
@@ -234,6 +239,7 @@ class Collector:
         self.requests += 1
         time.sleep(1.1)
         try:
+            if self.before_request is not None: self.before_request()
             data = request('dripify', 'search', linkedin_url='https://' + profile)['data']
             if not isinstance(data, list) or any(not isinstance(r, dict) or not str(r.get('id', '')).isdigit() for r in data):
                 raise ReadFailure('UNEXPECTED_LOOKUP_SCHEMA')

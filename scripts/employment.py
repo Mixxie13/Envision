@@ -13,6 +13,21 @@ def normalized(value):
     return ' '.join(unicodedata.normalize('NFKC', str(value or '')).replace('’', "'").casefold().split())
 
 
+def small_company_fallback(person, clock):
+    """Explicit current research-QC evidence, not inherited executive authority."""
+    record=person.get('small_company_fallback') or person.get('handoff',{}).get('small_company_fallback',{})
+    if not isinstance(record,dict):return False
+    try:
+        from eligibility import timestamp
+        return bool(record.get('small_company') is True and record.get('marketing_research_completed') is True and
+            record.get('reason') in ('no_marketing_person','only_one_marketing_person') and
+            record.get('reviewer_role')=='lead_sourcing_owner' and record.get('reviewed_original') is True and
+            record.get('evidence_ref') and record.get('source_sha256') and public_url(record.get('source_url')) and
+            normalized(record.get('company'))==normalized(person.get('company')) and
+            timestamp(record.get('observed_at')) <= clock < timestamp(record.get('expires_at')))
+    except (ValueError,TypeError):return False
+
+
 def assess(person, claims, as_of):
     """A current finding needs a same-date explicit review of an original profile.
 
@@ -48,7 +63,7 @@ def assess(person, claims, as_of):
             adverse.append(state);continue
         if state != 'current':
             reasons.append('HISTORICAL_OR_UNRESOLVED_PUBLICATION');continue
-        if normalized(claim.get('role')) != normalized(person.get('role')) or not relevant_role(claim.get('role', '')):
+        if normalized(claim.get('role')) != normalized(person.get('role')) or not relevant_role(claim.get('role', ''), small_company_fallback(person,assessment_time)):
             adverse.append('conflicting_role');continue
         if claim.get('stale') is True:
             reasons.append('STALE_EVIDENCE');continue

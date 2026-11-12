@@ -95,3 +95,5 @@ original spreadsheet order/values and paid-operation restrictions. Account-wide
 Dripify read/history retrieval was previously validated on the PR #7 deployment,
 but complete account/history coverage and dependable AI/contact research remain unresolved; do not
 treat saved stage progress as prospect or outreach clearance.
+
+The coordinated one-upload CLI and current readiness/authorization boundaries are documented in [COORDINATED_WORKFLOW.md](COORDINATED_WORKFLOW.md). It is offline by default; current provider access and evidence gaps prevent campaign-ready sourcing.

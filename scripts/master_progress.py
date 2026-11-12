@@ -51,6 +51,8 @@ def confirmed_person(person, contact_id, company, clock):
     if person.get('handoff'):
         from candidate_handoff import review
         return review(person, contact_id, company, clock)['confirmed_current_employment']
+    if any(any(token in risk for token in ('IDENTITY', 'ALIAS', 'ATTRIBUTION', 'ROUTING_CONFLICT')) for risk in person.get('risks', [])):
+        return False
     return supported_checks(person, contact_id, company, clock,
                             {'identity': 'confirmed', 'role_company': 'confirmed', 'company': 'confirmed'})
 
@@ -81,7 +83,8 @@ def snapshot(state, clock=None):
         manifest = [c['data'] for c in companies]
         if digest(manifest) != state.meta('master_signature'):
             raise ValueError('Legacy source integrity mismatch; original import needed')
-        state.set_meta('source_manifest', manifest)
+        if not state.db.execute('PRAGMA query_only').fetchone()[0]:
+            state.set_meta('source_manifest', manifest)
     if digest(manifest) != state.meta('master_signature'):
         raise ValueError('Original source manifest integrity mismatch')
     current = {c['id']: c for c in companies}
@@ -121,9 +124,11 @@ def snapshot(state, clock=None):
             if isinstance(raw, dict) and data.get('hubspot_contact_id') and str(data['hubspot_contact_id']) == str(raw.get('id')) and isinstance(raw.get('properties'), dict):
                 existing += 1
         duplicate_rows = name_positions[original['company'].strip().casefold()]
-        technical_pending = any((review(c['data'], c['id'], original['company'], clock)['eligibility_assessment'] if c['data'].get('handoff') else evaluate(c['data'].get('evidence_record'), now=clock))['technical_eligibility'] != 'eligible_for_review' for c in people)
+        from screening import project
+        screens = [project(c['data'], c['id'], original['company'], clock) for c in people]
+        technical_pending = any(v['technical_eligibility'] != 'eligible_for_review' for v in screens)
         unresolved = attempted and (technical_pending or any(value != 'complete' for value in jobs.values()) or not confirmed or any(c['data'].get('blocked') or c['data'].get('risks') for c in people))
-        unresolved = bool(unresolved or len(duplicate_rows) > 1 or not intact or (any(c['data'].get('handoff') for c in people) and (technical_pending or not confirmed)))
+        unresolved = bool(unresolved or len(duplicate_rows) > 1 or not intact or (bool(people) and technical_pending))
         outcome = 'not_yet_processed'
         if attempted and not processed:
             outcome = 'in_progress_or_missing_stage'
@@ -142,13 +147,14 @@ def snapshot(state, clock=None):
             reasons.append('POTENTIAL_DUPLICATE_SOURCE_ROWS_PRESERVED')
         outcomes.append({'company_id': cid, 'original_position': position, 'source_row': original['source_row'],
                          'batch': (position - 1) // 10 + 1, 'company': original['company'],
-                         'original_values': original['original'], 'original_priority': original['mapped'].get('priority'),
+                         'original_values': original['original'], 'original_columns': original.get('original_columns'), 'original_priority': original['mapped'].get('priority'),
                          'original_category': original['mapped'].get('category'), 'source_row_intact': intact,
                          'outcome': outcome, 'stage_statuses': jobs, 'research_sources_observed': researched,
                          'confirmed_contacts': confirmed, 'existing_hubspot_contacts': existing,
                          'verified_professional_emails': emails,
                          'email_outcome': 'verification_evidence_present_not_outreach_authorization' if emails else ('no_current_verified_individual_email_established' if processed else 'not_checked_or_in_progress'),
                          'unresolved': unresolved, 'reason_codes': reasons,
+                         'screening_counts': {status: sum(v['decision'] == status for v in screens) for status in ('blocked', 'pending', 'eligible_for_review')},
                          'potential_duplicate_positions': duplicate_rows if len(duplicate_rows) > 1 else [],
                          'lead_sourcing_owner_reviewed': bool(batches.get((position - 1) // 10 + 1, {}).get('reviewed')),
                          'bridget_final_approval': 'not established by this tracker',
@@ -193,9 +199,9 @@ def atomic_text(path, text):
             os.unlink(tmp)
 
 
-def write_reports(state, completion=False):
+def write_reports(state, completion=False, output_directory=None):
     report = snapshot(state)
-    folder = state.directory
+    folder = Path(output_directory) if output_directory is not None else state.directory
     atomic_text(folder / 'master-progress.json', json.dumps(report, indent=2, ensure_ascii=False))
     fields = ['original_position', 'source_row', 'batch', 'company', 'original_priority', 'original_category', 'outcome', 'research_sources_observed', 'confirmed_contacts', 'existing_hubspot_contacts', 'verified_professional_emails', 'email_outcome', 'unresolved', 'reason_codes', 'potential_duplicate_positions', 'lead_sourcing_owner_reviewed', 'bridget_final_approval']
     import io
