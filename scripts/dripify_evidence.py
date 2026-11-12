@@ -170,8 +170,7 @@ class Collector:
                 if path == 'leads' and any(not str(r.get('id', '')).isdigit() for r in rows):
                     raise ReadFailure('UNEXPECTED_LEAD_ID')
                 nxt = data.get('nextCursor')
-                if nxt is not None and (not isinstance(nxt, str) or not nxt or len(nxt) > 128 or nxt == cursor or nxt in result['seen_cursors']):
-                    raise ReadFailure('INVALID_OR_REPEATED_CURSOR')
+                invalid_cursor = nxt is not None and (not isinstance(nxt, str) or not nxt or len(nxt) > 128 or nxt == cursor or nxt in result['seen_cursors'])
                 # Keep event metadata, not message text/attachments.
                 if messages:
                     rows = [{k: r[k] for k in ('eventId', 'createdAt', 'type', 'direction', 'senderType') if k in r} for r in rows]
@@ -189,6 +188,10 @@ class Collector:
                         existing.add(rid)
                 result['items'].extend(fresh)
                 result['pages'].append({'observed_at': now(), 'count': len(rows), 'has_next_cursor': nxt is not None})
+                if invalid_cursor:
+                    # Valid positive items survive a bad continuation token; the
+                    # snapshot stalls and cannot support a negative conclusion.
+                    raise ReadFailure('INVALID_OR_REPEATED_CURSOR')
                 if overlap:
                     # Preserve positives; changed page boundaries prevent completeness.
                     result['reason'] = 'OVERLAPPING_OR_CHANGED_RESULT_SET'

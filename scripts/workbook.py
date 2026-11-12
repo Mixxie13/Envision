@@ -61,6 +61,34 @@ def update(state, path, clock=None):
             book.create_sheet(name).append(header)
     validate(book)
     company_rows = {c['id']: c for c in state.companies()}
+    from screening import project
+    # Assessment time is not provider observation time. This records the same
+    # fail-closed projection used by the runner and whole-list tracker.
+    from datetime import datetime, timezone
+    screening_clock = clock or datetime.now(timezone.utc)
+    from candidate_handoff import refresh
+    refresh(state, clock=screening_clock)
+    for contact in state.contacts():
+        person = contact['data']; company = company_rows[contact['company_id']]
+        if person.get('handoff'): continue  # Already has the shared named review observation.
+        screen = project(person, contact['id'], company['data']['company'], screening_clock)
+        stable = {k: screen[k] for k in ('decision', 'technical_eligibility', 'reason_codes',
+                  'hubspot_status', 'dripify_status', 'campaign_ready', 'suppression_sources')}
+        state.observe(contact['company_id'], contact['id'], 'screening', screen['decision'], {
+            'name': person.get('name'), 'role': person.get('role'), 'linkedin_url': person.get('linkedin_url'),
+            'reason': 'SUPPRESSION_SCREENING_' + screen['decision'].upper(),
+            'evidence_record_id': contact['id'], 'source_url': person.get('source'),
+            'pending_reasons': screen['reason_codes'], 'screening': stable,
+            'provider_evidence_dates': screen['evidence_dates'],
+            'provider_reviews': person.get('handoff', person).get('provider_reviews', {})})
+    registry = state.meta('offline-email-suppression-v1', {})
+    for source_hash, source in registry.get('sources', {}).items():
+        marker = 'AUTO-SUPPRESSION-' + source_hash
+        if not any(row[0] == marker for row in list(book['Batch Summary'].values)[1:]):
+            append(book['Batch Summary'], [marker, 'Offline suppression list', 'Source rows / unique blocked emails',
+                str(source['data_rows']) + ' / ' + str(source['unique_emails']),
+                'Designated-list evidence only; reasons/dates/filter missing; no absence or subscription clearance',
+                'Source SHA256 ' + source_hash + '; imported_at is not a bounce date'])
     # Preserve existing company rows and values. New workbooks preserve all original categories.
     for company in state.companies():
         p = company['position']
@@ -100,12 +128,12 @@ def update(state, path, clock=None):
         append(book['Verification Evidence'], [evidence_id, company['data']['company'], payload.get('name', ''), obs['stage'], result,
             payload.get('source_url') or str(state.directory / 'state.sqlite'), payload.get('observed_at', ''), 'Reusable read-only workflow', payload.get('state'), '',
             payload.get('employment_status', 'Current employment not established by automation'), 'No absence/permission inferred',
-            json.dumps({'record_id': payload.get('evidence_record_id'), 'review_states': payload.get('review_states'), 'provenance': payload.get('provenance'), 'email_evidence': payload.get('email_evidence'), 'pending_reasons': payload.get('pending_reasons')}, ensure_ascii=False) if payload.get('review_states') else 'Retained immutable observation ' + obs['id']])
+            json.dumps({'record_id': payload.get('evidence_record_id'), 'review_states': payload.get('review_states'), 'provenance': payload.get('provenance'), 'email_evidence': payload.get('email_evidence'), 'pending_reasons': payload.get('pending_reasons'), 'screening': payload.get('screening'), 'provider_evidence_dates': payload.get('provider_evidence_dates'), 'provider_reviews': payload.get('provider_reviews')}, ensure_ascii=False) if payload.get('review_states') or payload.get('screening') else 'Retained immutable observation ' + obs['id']])
         evidence_ids.add(evidence_id)
         if payload.get('state') in ('pending', 'blocked'):
             marker = '[' + evidence_id + '] ' + str(result)
             if '[' + evidence_id + ']' not in issue_markers:
-                contact = next((c['data'] for c in state.contacts(company['id']) if c['id'] == obs['contact_id']), {})
+                contact = contacts.get(obs['contact_id'], {})
                 details = json.dumps({'record_id': payload.get('evidence_record_id') or obs['contact_id'],
                                       'source_url': payload.get('source_url') or contact.get('source'),
                                       'pending_reasons': payload.get('pending_reasons', [])}, ensure_ascii=False)

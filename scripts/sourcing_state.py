@@ -82,6 +82,8 @@ def read_master(path, mapping, sheet=None):
 class State:
     def __init__(self, directory, readonly=False):
         self.directory = Path(directory)
+        if (self.directory / '.suppression-import-journal.json').exists():
+            raise ValueError('Unfinished suppression import: recover before reading project state')
         if readonly:
             self.db = sqlite3.connect((self.directory / "state.sqlite").resolve().as_uri() + "?mode=ro", uri=True)
             self.db.row_factory = sqlite3.Row
@@ -163,6 +165,8 @@ class State:
 
     def contact(self, cid, company_id, payload):
         """Caller IDs are stable; repeated imports cannot erase suppression."""
+        from screening import unproject
+        payload = unproject(payload)
         old = self.db.execute('SELECT payload,company_id FROM contacts WHERE id=?', (cid,)).fetchone()
         if old and old['company_id'] != company_id:
             self.observe(company_id, cid, 'identity', 'pending', {'reason': 'CONTACT_COMPANY_CONFLICT'})
@@ -171,7 +175,13 @@ class State:
             before = json.loads(old['payload'])
             payload = {**before, **payload}
             payload['blocked'] = bool(before.get('blocked') or payload.get('blocked'))
-            payload['risks'] = sorted(set(before.get('risks', []) + payload.get('risks', [])))
+            from screening import adverse, identifiers
+            payload['retained_identifiers'] = sorted(identifiers(before) | identifiers(payload))
+            payload['risks'] = sorted(adverse(before) | set(payload.get('risks', [])))
+            from screening import email, _verified_aliases, RISK_CHECKS
+            if before.get('blocked') or adverse(before).intersection(RISK_CHECKS):
+                payload['retained_suppressed_emails'] = sorted(set(before.get('retained_suppressed_emails', [])) |
+                    ({email(before.get('email'))} - {''}) | _verified_aliases(before))
         # Separate records may refer to one person. Flag collisions across brands,
         # never silently merge by name or discard adverse evidence.
         profile = payload.get('linkedin_url') or ''
@@ -197,7 +207,12 @@ class State:
 
     def contacts(self, company_id=None):
         query = 'SELECT * FROM contacts' + (' WHERE company_id=?' if company_id else '')
-        return [dict(r, data=json.loads(r['payload'])) for r in self.db.execute(query, (company_id,) if company_id else ())]
+        from screening import reconcile
+        # Reconcile account-local retained evidence before company filtering so
+        # suppression cannot disappear across brands, candidate IDs or load order.
+        rows = reconcile([dict(r, data=json.loads(r['payload'])) for r in self.db.execute('SELECT * FROM contacts')],
+                         self.meta('offline-email-suppression-v1'))
+        return [r for r in rows if company_id is None or r['company_id'] == company_id]
 
     def observe(self, company_id, contact_id, stage, state, evidence):
         payload = {'state': state, **evidence}

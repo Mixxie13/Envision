@@ -85,7 +85,7 @@ class CandidateHandoffTests(unittest.TestCase):
         self.state.contact('old',self.company['id'],{'name':'Annagiulia Quattrone','linkedin_url':'https://linkedin.com/in/quattrone','blocked':True,'risks':['HISTORICAL_HARD_BOUNCE','AMBIGUOUS_BASELINE_IDENTITY']})
         row=self.row('Giulia Quattrone',linkedin_url='https://linkedin.com/in/quattrone')
         cid=ingest(self.state,[row],clock=NOW)[0];refresh(self.state,NOW)
-        self.assertTrue(self.person(cid)['blocked']);self.assertEqual(self.view(cid)['outreach_eligibility'],'blocked')
+        self.assertFalse(self.person(cid).get('blocked'));self.assertEqual(self.view(cid)['outreach_eligibility'],'pending')
         self.assertEqual(self.view(cid)['employment_assessment']['status'],'conflicting');self.assertTrue(self.person('old')['blocked'])
     def test_missing_identifier_dates_and_stale_records_never_qualify(self):
         cid=ingest(self.state,[self.row(original_source_url=None,evidence_date=None,research_date=None,stale=True)],clock=NOW)[0]

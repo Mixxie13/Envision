@@ -228,3 +228,13 @@ HubSpot/Dripify follow-up. Missing identifiers, source dates, company attributio
 reviewed current-role evidence, provider coverage or approvals remain unresolved.
 The isolated ATTITUDE preview demonstrates named provisional records; it does not
 establish confirmed employment, usable mailboxes, new CRM contacts or outreach.
+
+### Suppression audit and shared screening
+
+[SUPPRESSION_COVERAGE.md](SUPPRESSION_COVERAGE.md) records the offline endpoint,
+permission, pagination, cache and coverage audit. `screening.py` projects retained
+suppression across exact-linked records before company filtering; all runner,
+workbook and progress decisions use that projection. Email-only HubSpot matching
+and partial-result handling retain adverse evidence. Complete subscription,
+sequence/history, ownership and Dripify account coverage remain pending. This does
+not add a live integration, grant campaign readiness or change approval policy.

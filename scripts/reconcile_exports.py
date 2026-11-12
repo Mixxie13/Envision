@@ -57,6 +57,7 @@ def reconcile(checklist, rows):
     Unmatched rows are retained for review. Negative evidence cannot clear
     adverse baseline evidence. Names and company names are never join keys.
     """
+    from screening import email as normalize_email
     contacts = checklist['contacts']
     keys = [c['contact_key'] for c in contacts]
     if len(set(keys)) != len(keys):
@@ -74,10 +75,10 @@ def reconcile(checklist, rows):
         flags, reasons, accepted, bound_rows = set(c.get('baseline_flags', [])), [], [], []
         complete = set()
         for row in grouped[c['contact_key']]:
-            cid, lid, email = row.get('hubspot_contact_id', ''), row.get('linkedin_url', ''), row.get('email', '')
+            cid, lid, email = row.get('hubspot_contact_id', ''), row.get('linkedin_url', ''), normalize_email(row.get('email', ''))
             known_id = c.get('hubspot_contact_id', '')
             known_li = linkedin(c.get('linkedin_url', ''))
-            known_email = c.get('email', '')
+            known_email = normalize_email(c.get('email', ''))
             id_match = bool(cid and known_id and cid == known_id)
             li_match = bool(known_li and linkedin(lid) == known_li)
             email_match = bool(email and known_email and email == known_email)
@@ -85,6 +86,13 @@ def reconcile(checklist, rows):
                             (lid and known_li and linkedin(lid) != known_li) or
                             (email and known_email and email != known_email))
             if conflict or not (id_match or li_match or email_match):
+                # An exact shared identifier plus adverse evidence cannot be
+                # discarded merely because another identifier disagrees. Keep
+                # the conflict for review; never merge or grant clearance.
+                if (id_match or li_match or email_match) and any(row.get(k) == 'true' for k in ADVERSE):
+                    flags.add('Blocked')
+                    reasons.append('CONFLICTING_IDENTIFIER_WITH_ADVERSE_EVIDENCE')
+                    reasons.extend(k.upper() for k in ADVERSE if row.get(k) == 'true')
                 flags.add('Ambiguous')
                 reasons.append('IDENTITY_CONFLICT_OR_UNBOUND_ROW')
                 rejected.append({'contact_key': c['contact_key'], 'reason': 'Identity conflict/unbound', 'evidence': row})
@@ -132,6 +140,8 @@ def reconcile(checklist, rows):
                        'flags': ordered, 'reason_codes': sorted(set(reasons)),
                        'complete_sources_claimed': sorted(complete), 'evidence': grouped[c['contact_key']],
                        'outreach_ready': False,
+                       'suppression_status': 'blocked' if 'Blocked' in flags else 'pending',
+                       'subscription_clearance': 'pending', 'activity_coverage': 'pending',
                        'pending': ['Freshness policy and source coverage require review',
                                    'Employment, deliverability, approvals and cross-channel policy remain separate',
                                    'No confirmed-new or outreach authorization is issued']})

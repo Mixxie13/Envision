@@ -77,19 +77,6 @@ def validate_rows(state, rows, batch=None):
     return planned
 
 
-def _retain_bounces(state, person, cid):
-    address = str(person.get('email') or '').strip().casefold()
-    for other in state.contacts():
-        data = other['data']
-        bounced = ('HISTORICAL_HARD_BOUNCE' in data.get('risks', []) or
-                   data.get('evidence_record', {}).get('checks', {}).get('hard_bounce', {}).get('result') == 'bounced')
-        if address and str(data.get('email') or '').strip().casefold() == address and bounced:
-            person['blocked'] = True
-            person['risks'] = sorted(set(person.get('risks', []) + ['HISTORICAL_HARD_BOUNCE']))
-            refs = person.setdefault('retained_bounce_sources', [])
-            person['retained_bounce_sources'] = sorted(set(refs + [other['id']]))
-
-
 def _date_valid(value):
     try:
         datetime.fromisoformat(value.replace('Z', '+00:00'))
@@ -156,14 +143,16 @@ def review(person, contact_id, company, clock=None):
     verified = bool(linked and
                     any(e['email'] == subject_email(record) for e in linked) and supported_checks(effective, contact_id, company, clock,
                             {'professional_email': 'individual', 'verification': 'valid'}))
-    result = evaluate(record, now=clock)
+    from screening import enforce, decision
+    record = enforce(person, record)
+    result = decision(person, record, clock)
     if person.get('blocked') and result['decision'] != 'blocked':
         result['decision'] = result['technical_eligibility'] = 'blocked'
         result['reason_codes'].append('RETAINED_BASELINE_BLOCK')
     role_supported = relevant_role(person.get('role', '')) and not any(r in record['unresolved_risks'] for r in ('PARENT_OR_COMPANY_ATTRIBUTION_UNRESOLVED', 'CONFLICTING_ROLE_EVIDENCE'))
     def provider_status(check):
         result = record['checks'].get(check, {}).get('result')
-        return result if result and supported_checks(effective, contact_id, company, clock, {check: result}) else 'pending'
+        return result if result == 'absent' and not record['unresolved_risks'] and supported_checks(effective, contact_id, company, clock, {check: result}) else 'pending'
     return {'discovered_candidate': relevant_role(person.get('role', '')),
             'provisional_role_evidence': bool(role_supported and not current),
             'confirmed_current_employment': bool(current), 'person_linked_email_candidate': bool(linked),
@@ -201,17 +190,15 @@ def ingest(state, rows, batch=None, clock=None):
         known = [c['data'] for c in state.contacts() if c['id'] != cid and profile and linkedin(c['data'].get('linkedin_url')) == profile]
         risks = set(old.get('risks', []))
         for other in known:
-            risks.update(other.get('risks', []))
             if normalized(other.get('name')) != normalized(row['name']): risks.add('IDENTITY_CONFLICT')
         person = {**old, 'name': row['name'].strip(), 'role': row['job_title'].strip(),
                   'linkedin_url': 'https://' + profile if profile else '',
                   'employer_attribution': row['employer_attribution'], 'email': row.get('email', old.get('email', '')),
                   'source': row.get('original_source_url') or row.get('source_reference') or 'Manual candidate; original source pending',
-                  'blocked': bool(old.get('blocked') or any(k.get('blocked') for k in known)),
+                  'blocked': bool(old.get('blocked')),
                   'risks': sorted(risks), 'handoff': packet, 'current_employment_confirmed': False, 'outreach_ready': False}
         if old.get('linkedin_url') and profile and linkedin(old['linkedin_url']) != profile:
             person['risks'] = sorted(set(person['risks'] + ['IDENTITY_CONFLICT_PROFILE_CORRECTION_REQUIRES_REVIEW']))
-        _retain_bounces(state, person, cid)
         state.contact(cid, company['id'], person)
         # State may add identity-collision risks; assess the stored record, not a stale copy.
         person = next(c['data'] for c in state.contacts(company['id']) if c['id'] == cid)
@@ -236,17 +223,22 @@ def provider_review(state, company_id, result, provider, clock=None):
     contacts = {c['id']: c for c in state.contacts(company_id)}
     for item in result.get('contacts', []):
         contact = contacts.get(item.get('contact_id'))
-        if not contact or not contact['data'].get('handoff'): continue
+        if not contact: continue
         person = contact['data']
-        packet = person['handoff']
+        packet = person['handoff'] if person.get('handoff') else person
         notes = packet.setdefault('provider_reviews', {}).setdefault(provider, [])
         note = {'reviewed_at': clock.isoformat(), 'reason': item.get('reason') or result.get('reason'),
                 'positive_match': bool(item.get('matches') or item.get('retained_exact_matches')),
-                'previous_outreach_confirmed': item.get('previous_outreach_confirmed') is True,
+                'previous_outreach_confirmed': item.get('previous_outreach_confirmed') is True or any(
+                    n.get('previous_outreach_confirmed') is True for n in notes),
+                'identity_conflict': item.get('identity_conflict') is True or any(n.get('identity_conflict') is True for n in notes),
+                'invitation_conflict': item.get('invitation_conflict') is True or any(n.get('invitation_conflict') is True for n in notes),
                 'coverage_complete': False}
         packet['provider_reviews'][provider] = _unique(notes + [note])
-        if note['positive_match'] or note['previous_outreach_confirmed']:
+        if note['positive_match'] or note['previous_outreach_confirmed'] or note['invitation_conflict']:
             person['risks'] = sorted(set(person.get('risks', []) + ['EXISTING_OR_PREVIOUS_OUTREACH_REQUIRES_REVIEW']))
+        if note['identity_conflict']:
+            person['risks'] = sorted(set(person.get('risks', []) + ['IDENTITY_CONFLICT_PROVIDER_HISTORY']))
         state.contact(contact['id'], company_id, person)
 
 
@@ -259,11 +251,8 @@ def refresh(state, clock=None, company_id=None):
         profile = linkedin(person.get('linkedin_url'))
         others = [c['data'] for c in state.contacts() if c['id'] != contact['id'] and profile and linkedin(c['data'].get('linkedin_url')) == profile]
         for other in others:
-            person['blocked'] = bool(person.get('blocked') or other.get('blocked'))
-            person['risks'] = sorted(set(person.get('risks', []) + other.get('risks', [])))
             if normalized(other.get('name')) != normalized(person['name']):
                 person['risks'] = sorted(set(person['risks'] + ['IDENTITY_CONFLICT']))
-        _retain_bounces(state, person, contact['id'])
         company = next(c for c in state.companies() if c['id'] == contact['company_id'])
         view = review(person, contact['id'], company['data']['company'], clock)
         person['evidence_record'] = view['record']

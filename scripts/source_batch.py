@@ -22,36 +22,8 @@ def evaluate_contacts(state, company):
     results = []
     for row in state.contacts(company['id']):
         person = row['data']
-        if person.get('handoff'):
-            from candidate_handoff import review
-            result = review(person, row['id'], company['data']['company'])['eligibility_assessment']
-            results.append({**result, 'contact_id': row['id']})
-            continue
-        subject = {'contact_id': row['id'], 'company': company['data']['company'],
-                   'full_name': person.get('name') or '', 'email': person.get('email') or '',
-                   'linkedin_url': person.get('linkedin_url') or ''}
-        checks = {}
-        if person.get('blocked'):
-            # Existing known suppression is never cleared by incomplete providers.
-            mapping = {'HISTORICAL_HARD_BOUNCE': ('hard_bounce', 'bounced'),
-                       'EMAIL_OPT_OUT': ('opt_out', 'opted_out'),
-                       'ACTIVE_SEQUENCE': ('hubspot_sequence', 'active')}
-            for reason in person.get('risks', []):
-                if reason in mapping:
-                    check, result = mapping[reason]
-                    checks[check] = {'result': result, 'subject': subject,
-                                     'source': person.get('source', 'Retained adverse CRM observation'),
-                                     'complete': False, 'state': 'unresolved'}
-        record = {'subject': subject, 'channel': person.get('channel'), 'checks': checks,
-                  'unresolved_risks': ['SOURCE_COVERAGE_AND_POLICY_UNRESOLVED'] + person.get('risks', []),
-                  'approvals': {}}
-        result = eligibility.evaluate(record)
-        if person.get('blocked') and result['decision'] != 'blocked':
-            result['decision'] = 'blocked'
-            result['technical_eligibility'] = 'blocked'
-            result['reason_codes'].append('RETAINED_BASELINE_BLOCK')
-        result['contact_id'] = row['id']
-        results.append(result)
+        from screening import project
+        results.append(project(person, row['id'], company['data']['company']))
     return {'state': 'blocked' if any(r['decision'] == 'blocked' for r in results) else 'pending',
             'reason': 'RESEARCH_REVIEW_ONLY_NOT_OUTREACH_CLEARANCE', 'contacts': results,
             'approval_policy': 'Lead Sourcing Owner research/QC review, then Bridget final approval; historical Roxy records never satisfy current review'}

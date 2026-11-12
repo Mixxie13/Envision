@@ -20,19 +20,16 @@ CONTACT_FIELDS = ('firstname', 'lastname', 'jobtitle', 'email', 'hs_additional_e
 
 def contact_summary(record):
     p = record.get('properties', {})
-    adverse = []
-    if p.get('hs_email_hard_bounce_reason_enum') or p.get('hs_email_hard_bounce_reason'):
-        adverse.append('HISTORICAL_HARD_BOUNCE')
-    if any(str(value).lower() == 'true' for key, value in p.items() if key == 'hs_email_optout' or key.startswith('hs_email_optout_')):
-        adverse.append('EMAIL_OPT_OUT')
-    active_count = str(p.get('hs_sequences_actively_enrolled_count') or '')
-    if str(p.get('hs_sequences_is_enrolled')).lower() == 'true' or (active_count.isdigit() and int(active_count) > 0):
-        adverse.append('ACTIVE_SEQUENCE')
-    return {'name': ' '.join(str(p.get(k) or '') for k in ('firstname', 'lastname')).strip(),
+    from screening import hubspot_signals
+    signals = hubspot_signals(p)
+    adverse = signals['risks']
+    from screening import email
+    return {'email_aliases': sorted({email(v) for v in str(p.get('hs_additional_emails') or '').split(';') if email(v)}), 'name': ' '.join(str(p.get(k) or '') for k in ('firstname', 'lastname')).strip(),
             'role': p.get('jobtitle') or '', 'email': p.get('email') or '',
             'linkedin_url': p.get('hs_linkedin_url') or '', 'hubspot_contact_id': str(record['id']),
             'hubspot_company_id': p.get('associatedcompanyid') or '',
-            'blocked': bool(adverse), 'risks': adverse,
+            'blocked': bool(signals['positive_restrictions']), 'risks': adverse,
+            'hubspot_suppression': signals,
             'outreach_ready': False, 'current_employment_confirmed': False,
             'coverage': 'Existing record only; subscription/history/freshness not cleared',
             'raw_record': record}
@@ -58,7 +55,8 @@ class Providers:
                 if exc.category == 'RATE_LIMITED':
                     self.halted.add('hubspot')
                 return {'observed_at': now(), 'complete': False, 'error': exc.safe()}
-        return self.state.cached(['hubspot', key], collect)
+        result = self.state.cached(['hubspot', key], collect)
+        return {**result, 'freshness_status': 'unknown', 'coverage_complete': False}
 
     def client(self):
         if self._client is None:
@@ -131,10 +129,9 @@ class Providers:
             known = [c['data'] for c in self.state.contacts() if profile and linkedin(c['data'].get('linkedin_url')) == profile]
             risks = set(candidate['risks'])
             for old in known:
-                risks.update(old.get('risks', []))
                 if old.get('name', '').casefold() != candidate['name'].casefold():
                     risks.add('IDENTITY_CONFLICT')
-            payload = {**candidate, 'blocked': any(c.get('blocked') for c in known),
+            payload = {**candidate, 'blocked': False,
                        'risks': sorted(risks), 'source': 'Apollo People API Search: ' + candidate['apollo_person_id'],
                        'research_status': 'apollo_candidate_current_employment_pending'}
             self.state.contact('apollo:' + digest([company['id'], candidate['apollo_person_id']])[:24], company['id'], payload)
@@ -155,14 +152,17 @@ class Providers:
                 results.append({'contact_id': subject['id'], 'reason': 'RETAINED_CRM_ID_OR_PRIOR_QUERY', 'all_company_association_read': assoc})
                 continue
             profile = linkedin(person.get('linkedin_url'))
-            address = person.get('email') or ''
+            from screening import email
+            address = email(person.get('email'))
             if not self.live or not (profile or address):
                 results.append({'contact_id': subject['id'], 'reason': 'EXACT_PERSON_IDENTIFIER_UNAVAILABLE'})
                 continue
             known = self.metadata('contacts')
             if profile and 'hs_linkedin_url' not in known:
-                results.append({'contact_id': subject['id'], 'reason': 'PROFILE_PROPERTY_UNAVAILABLE'})
-                continue
+                if not (address and 'email' in known):
+                    results.append({'contact_id': subject['id'], 'reason': 'PROFILE_PROPERTY_UNAVAILABLE', 'state': 'pending'})
+                    continue
+                profile = ''  # Email-only discovery is still possible; no profile agreement asserted.
             path = profile.split('linkedin.com', 1)[1] if profile else ''
             variants = ['https://www.linkedin.com' + path, 'https://linkedin.com' + path] if profile else []
             groups = [{'filters': [{'propertyName': 'hs_linkedin_url', 'operator': 'EQ', 'value': v}]} for v in variants]
@@ -170,15 +170,28 @@ class Providers:
                 groups.append({'filters': [{'propertyName': 'email', 'operator': 'EQ', 'value': address}]})
             if address and 'hs_additional_emails' in known:
                 groups.append({'filters': [{'propertyName': 'hs_additional_emails', 'operator': 'CONTAINS_TOKEN', 'value': address}]})
+            if not groups:
+                results.append({'contact_id': subject['id'], 'reason': 'SUPPORTED_IDENTIFIER_PROPERTY_UNAVAILABLE', 'state': 'pending'})
+                continue
             fields = [n for n in CONTACT_FIELDS if n in known]
+            fields += [n for n in known if n.startswith('hs_email_optout_') and n not in fields]
             lookup = self.read(['person-identifiers', profile, address, fields], lambda: self.client().search('contacts', groups, fields))
-            results.append({'contact_id': subject['id'], 'lookup': lookup, 'meaning': 'Returned exact profile matches only, not employment or absence proof'})
+            item = {'contact_id': subject['id'], 'name': person.get('name'), 'role': person.get('role'),
+                    'linkedin_url': person.get('linkedin_url'), 'lookup': lookup, 'state': 'pending',
+                    'matches': [], 'coverage_complete': False, 'reason': 'IDENTITY_AND_HISTORY_REVIEW_PENDING',
+                    'meaning': 'Exact returned email/profile identifiers only; not current employment or absence proof'}
+            results.append(item)
             for record in lookup.get('data', {}).get('results', []):
                 props = record.get('properties', {})
-                emails = [props.get('email')] + str(props.get('hs_additional_emails') or '').split(';')
+                emails = {email(v) for v in [props.get('email'), *str(props.get('hs_additional_emails') or '').split(';')] if email(v)}
                 if not ((profile and linkedin(props.get('hs_linkedin_url')) == profile) or (address and address in emails)):
                     self.state.observe(company['id'], subject['id'], 'identity', 'pending', {'reason': 'UNBOUND_SEARCH_RESULT', 'record_id': str(record['id'])})
                     continue
+                item['matches'].append({'id': str(record['id']), 'basis': 'linkedin' if profile and linkedin(props.get('hs_linkedin_url')) == profile else 'email'})
+                if person.get('linkedin_url') and props.get('hs_linkedin_url') and linkedin(person['linkedin_url']) != linkedin(props['hs_linkedin_url']):
+                    updated = {**person, 'risks': sorted(set(person.get('risks', []) + ['IDENTITY_CONFLICT_EMAIL_PROFILE_DISAGREEMENT']))}
+                    self.state.contact(subject['id'], company['id'], updated)
+                    item['reason'] = 'EMAIL_MATCH_PROFILE_CONFLICT'
                 self.state.contact('hs:' + str(record['id']), company['id'], contact_summary(record))
         return {'state': 'pending', 'reason': 'IDENTITY_BINDING_AND_DUPLICATE_COVERAGE_REQUIRE_REVIEW', 'contacts': results}
 
@@ -189,12 +202,13 @@ class Providers:
                 {'items': [], 'coverage_complete': False, 'reason': 'LIVE_COLLECTION_NOT_ENABLED'})
         index = self._dripify_index
         retained_index = self.state.meta('dripify-retained-index-v2', {})
-        visible = {str(r['id']): r for r in retained_index.get('items', [])}
-        visible.update({str(r['id']): r for r in index.get('items', [])})
+        visible = {digest(r): r for r in retained_index.get('items', []) + index.get('items', [])}
         for contact in self.state.contacts(company['id']):
             person = contact['data']
             profile = linkedin(person.get('linkedin_url'))
-            row = {'contact_id': contact['id'], 'name': person.get('name', ''),
+            notes = person.get('handoff', person).get('provider_reviews', {}).get('dripify', [])
+            row = {'previous_outreach_confirmed': any(n.get('previous_outreach_confirmed') is True for n in notes),
+                   'freshness_status': 'unknown', 'coverage_complete': False, 'contact_id': contact['id'], 'name': person.get('name', ''),
                    'linkedin_url': person.get('linkedin_url', ''),
                    'source_url': str(self.state.directory / 'state.sqlite'),
                    'reviewed_at': now(), 'outreach_ready': False,
@@ -221,6 +235,7 @@ class Providers:
                     row['identifier_lookup'] = self.dripify_collector.lookup(person.get('linkedin_url'))
                     matches = row['identifier_lookup']['items']
                 row['matches'] = matches
+                row['identity_conflict'] = any(len({linkedin(v.get('linkedinProfileUrl')) for v in visible.values() if str(v['id']) == str(m['id']) and linkedin(v.get('linkedinProfileUrl'))}) > 1 for m in matches)
                 row['reason'] = ('AMBIGUOUS_EXACT_PROFILE_MATCHES' if len(matches) > 1 else
                     'CONFIRMED_IDENTIFIER_MATCH' if matches else 'NO_MATCH_WITHIN_PARTIAL_COVERAGE')
                 if not matches and row.get('identifier_lookup', {}).get('reason') in ('PROFILE_LOOKUP_FAILED', 'RUN_REQUEST_BUDGET_OR_RATE_LIMIT_REACHED'):
@@ -229,7 +244,7 @@ class Providers:
                     row['histories'] = [self.dripify_collector.lead_history(r['id']) for r in matches]
                     # Exact provider event names confirmed in the live validation.
                     events = [e for h in row['histories'] for e in h['activity']['items']]
-                    row['previous_outreach_confirmed'] = any(e.get('sequenceEventType') in ('CONNECT_SENT', 'MESSAGE_SENT') for e in events)
+                    row['previous_outreach_confirmed'] = row['previous_outreach_confirmed'] or any(e.get('sequenceEventType') in ('CONNECT_SENT', 'MESSAGE_SENT') for e in events)
                     row['invitation_conflict'] = any(e.get('sequenceEventType') == 'CONNECT_ERROR' and e.get('error') == 'INVITE_ALREADY_SENT' for e in events)
                     row['match_status'] = 'confirmed_exact_linkedin' if len(matches) == 1 else 'ambiguous_exact_linkedin'
                     if len(matches) == 1 and row['previous_outreach_confirmed']:
@@ -239,7 +254,12 @@ class Providers:
                     row['observed_at'] = row['histories'][0]['detail'].get('observed_at', '')
                 elif row.get('identifier_lookup'):
                     row['observed_at'] = row['identifier_lookup'].get('observed_at', '')
+                if row['identity_conflict']:
+                    row['reason'] = 'CONFLICTING_LEAD_PROFILE_HISTORY'
+                    row['match_status'] = 'historical_match_identity_review_pending'
             output.append(row)
+        from candidate_handoff import provider_review
+        provider_review(self.state, company['id'], {'contacts': output}, 'dripify')
         return {'state': 'pending', 'reason': 'ACCOUNT_OWNER_AND_HISTORY_COVERAGE_UNVERIFIED',
                 'contacts': output, 'all_visible_index': {
                     'unique_leads_in_snapshot': len(index.get('items', [])),

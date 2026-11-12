@@ -80,7 +80,7 @@ class ApolloTests(unittest.TestCase):
             self.assertEqual(build.return_value.open.call_args.kwargs['timeout'],20)
             from email_api import NoRedirect
             self.assertIsInstance(build.call_args.args[0],NoRedirect)
-    def test_exact_profile_inherits_bounce_block_and_name_conflict(self):
+    def test_ambiguous_profile_keeps_candidate_pending_and_original_bounce(self):
         from provider_evidence import Providers
         self.authorize()
         self.state.contact('hs:old',self.company['id'],{'name':'Different Name','linkedin_url':self.person()['linkedin_url'],'blocked':True,'risks':['HISTORICAL_HARD_BOUNCE']})
@@ -88,7 +88,8 @@ class ApolloTests(unittest.TestCase):
         provider.apollo_client=ApolloPeople(self.state,True,Mock(return_value={'people':[self.person()],'total_entries':1}))
         with patch.dict('os.environ',{'APOLLO_API_KEY':'synthetic-key'}):provider.apollo(self.company)
         rows=[c['data'] for c in self.state.contacts() if c['id'].startswith('apollo:')]
-        self.assertTrue(rows[0]['blocked']);self.assertIn('HISTORICAL_HARD_BOUNCE',rows[0]['risks']);self.assertIn('IDENTITY_CONFLICT',rows[0]['risks'])
+        self.assertFalse(rows[0]['blocked']);self.assertNotIn('HISTORICAL_HARD_BOUNCE',rows[0]['risks']);self.assertIn('IDENTITY_CONFLICT',rows[0]['risks'])
+        self.assertTrue(next(c['data']['blocked'] for c in self.state.contacts() if c['id']=='hs:old'))
 
     def test_ambiguous_organization_cache_remains_pending_on_reuse(self):
         from provider_evidence import Providers
