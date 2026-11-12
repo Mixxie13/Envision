@@ -16,10 +16,10 @@ Unreadable files or malformed JSON produce a pending JSON result without echoing
 input or exception details. The importable function is `evaluate(record, now=...)`;
 tests supply a timezone-aware evaluation time. Normal CLI use takes current UTC.
 
-## Linked record contract (version 1)
+## Linked record contract (current; approval policy v2)
 
 Keep this evidence outside the prospecting sheet. The existing SOP, its exact
-14 columns, five Email Confidence labels, and Roxy/Bridget review process are
+14 columns, five Email Confidence labels, and Lead Sourcing Owner/Bridget review process are
 unchanged. Link the record using Batch, Company, Full Name and LinkedIn; store
 those in `subject` alongside a stable local `contact_id` and exact email candidate.
 Names and company alone are not reliable identity matching. No HubSpot property
@@ -37,7 +37,7 @@ Top-level JSON object:
 - `unresolved_risks`: explicit list; only an empty list passes. Preserve catch-all,
   unknown results, conflicting provider results and ownership/domain uncertainty
   until evidence actually resolves them. A positive second check cannot erase them.
-- `approvals`: independent `roxy` and `bridget` review records, described below.
+- `approvals`: independent `lead_sourcing_owner` and `bridget` review records, described below.
 
 Each check is an object with these fields:
 
@@ -113,9 +113,9 @@ Each approval object has `state`, `subject`, `source`, and `observed_at`. Only
 `state: approved` with matching full subject, retained review evidence and a
 non-future timezone-aware date satisfies that person's review check. Missing,
 rejected or otherwise unresolved reviews keep the overall decision pending. These
-are assertions of separately obtained Roxy research review and Bridget approval;
+are assertions of separately obtained Lead Sourcing Owner research review and Bridget approval;
 the evaluator cannot authenticate them and does not manufacture either approval.
-The existing Roxy-first order remains a procedural requirement, not a new workflow.
+The existing Lead Sourcing Owner-first order remains a procedural requirement, not a new workflow.
 
 Output includes one overall `decision`, reason codes, `technical_eligibility`
 computed before approval checks, independent approval records, proposed `channel`,
@@ -139,7 +139,7 @@ sending/enrollment path currently exists here to attach a mandatory action gate 
 Missing live integrations mean actual operational records stay pending until
 required authoritative evidence and policy decisions are available.
 
-Roxy/Bridget need to establish:
+Lead Sourcing Owner/Bridget need to establish:
 
 1. Evidence-store/unresolved-log locations, identity linkage and trusted reviewers.
 2. Freshness/expiry rules for each evidence type and approval scope/revalidation.
@@ -154,15 +154,19 @@ Roxy/Bridget need to establish:
    Step 6a's current instruction to skip Dripify lookup for email-selected contacts.
    This phase does not change that rule or silently run additional lookups.
 
-## Later integration, not implemented
+## Complete authoritative evidence normalization remains pending
 
-Add read-only adapters only after verifying actual account permissions, documented
+Read-only HubSpot/Dripify collection and the shared per-person handoff now exist; see
+[SOURCING_WORKFLOW.md](SOURCING_WORKFLOW.md). They retain warnings and adverse
+evidence rather than manufacturing passing checks. Complete authoritative normalization
+requires verification of actual account permissions, documented
 endpoints/properties and real response semantics. HubSpot evidence must cover
 company/name/domain and contact matches, historical hard bounces, opt-outs and
 applicable subscriptions, active sequences, and outreach/reply history. Dripify
 adapters must establish complete lead matches, contact campaign membership/states
-and result completeness. Keep provider credentials on the relay and Codex access
-through the configured relay token; no new credential setup is part of this phase.
+and result completeness. Email/Dripify provider credentials stay on Render and Codex accesses those routes
+through `RELAY_TOKEN`. The separate read-only HubSpot client uses
+`HUBSPOT_ACCESS_TOKEN`; no credential changes are part of this commit.
 
 Adapters should bind evidence to the subject, retain raw result references and
 observation dates, exhaust verified pagination and normalize only known statuses.
@@ -281,7 +285,7 @@ For `channel: email`, intake always adds
 `EMAIL_CROSS_CHANNEL_POLICY_UNRESOLVED` and marks any cross-channel check unresolved.
 This preserves Step 6a's email-selected Dripify skip rule. A synthetic clear flag
 cannot resolve the SOP conflict. Email records remain pending unless a known block
-makes them blocked. Roxy must approve a resolution before a later implementation
+makes them blocked. The authorized policy owner must approve a resolution before a later implementation
 can change this behavior. Do not switch to LinkedIn to escape this pending check
 or any suppression. LinkedIn fixtures can exercise a technically complete handoff;
 they are not proof of production permission or a new routing policy.
@@ -302,3 +306,11 @@ fixtures in a separately authorized phase. Until then, provider data is unsuppor
 and missing policy stays pending. The unchanged evaluator still returns
 `authorized_to_send: false`. Phase 2A cannot authenticate local assertions, prove
 absence, enforce actions elsewhere or prevent concurrent outreach.
+
+## Current approval-role policy (v2)
+
+Active approvals require `lead_sourcing_owner` (research/QC) and `bridget`
+(final review). Bridget's observation may not precede research review. Legacy
+`approvals.roxy` input is returned unchanged under `historical_approvals.roxy`;
+it never satisfies the active review. No automatic aliasing, authority transfer,
+paid-credit approval or sending permission is inferred. Inputs are not mutated.

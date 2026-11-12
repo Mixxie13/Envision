@@ -1,5 +1,6 @@
 """Offline, read-only pre-outreach review gate. No provider or credential access."""
 import argparse
+from copy import deepcopy
 from datetime import datetime, timezone
 import json
 import sys
@@ -119,7 +120,7 @@ def evaluate(record, now=None):
     if not isinstance(approvals, dict):
         approvals = {}
     approval_output = {}
-    for person in ('roxy', 'bridget'):
+    for person in ('lead_sourcing_owner', 'bridget'):
         item = approvals.get(person)
         approval_output[person] = item if isinstance(item, dict) else {'state': 'missing'}
         if not isinstance(item, dict) or item.get('state') != 'approved':
@@ -132,7 +133,19 @@ def evaluate(record, now=None):
                     raise ValueError('Future approval')
             except (ValueError, TypeError, OverflowError):
                 pending.append(person.upper() + '_APPROVAL_DATE_INVALID')
+    # Keep legacy research approvals as history, never as current authority.
+    historical = {'roxy': deepcopy(approvals['roxy'])} if 'roxy' in approvals else {}
+    owner = approval_output.get('lead_sourcing_owner', {})
+    final = approval_output.get('bridget', {})
+    if owner.get('state') == 'approved' and final.get('state') == 'approved':
+        try:
+            if timestamp(final.get('observed_at')) < timestamp(owner.get('observed_at')):
+                pending.append('BRIDGET_APPROVAL_PRECEDES_RESEARCH_REVIEW')
+        except (ValueError, TypeError, OverflowError):
+            pass  # Date validation above already fails closed.
     return {
+        'approval_policy': 'lead-sourcing-owner-bridget-v2',
+        'historical_approvals': historical,
         'decision': 'blocked' if blocked else 'pending' if pending else 'eligible_for_review',
         'technical_eligibility': technical,
         'reason_codes': sorted(set(blocked + pending)),

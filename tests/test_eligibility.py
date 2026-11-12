@@ -26,7 +26,7 @@ def contact():
                                 for name, value in eligibility.CHECKS.items()},
                      'approvals': {person: {'state': 'approved', 'source': 'synthetic review',
                                            'observed_at': '2030-01-01T00:00:00Z', 'subject': subject}
-                                   for person in ('roxy', 'bridget')}})
+                                   for person in ('lead_sourcing_owner', 'bridget')}})
 
 
 class EligibilityTests(unittest.TestCase):
@@ -102,7 +102,7 @@ class EligibilityTests(unittest.TestCase):
         self.assertEqual(self.evaluate(record)['decision'], 'pending')
 
     def test_missing_approvals_separate_from_technical_eligibility(self):
-        for person in ('roxy', 'bridget'):
+        for person in ('lead_sourcing_owner', 'bridget'):
             record = contact(); del record['approvals'][person]
             result = self.evaluate(record)
             self.assertEqual(result['decision'], 'pending')
@@ -113,8 +113,28 @@ class EligibilityTests(unittest.TestCase):
 
     def test_approval_evidence_required(self):
         for field, value in [('subject', {}), ('source', ''), ('observed_at', None)]:
-            record = contact(); record['approvals']['roxy'][field] = value
+            record = contact(); record['approvals']['lead_sourcing_owner'][field] = value
             self.assertEqual(self.evaluate(record)['decision'], 'pending')
+
+    def test_historical_roxy_is_preserved_but_not_current_approval(self):
+        record = contact()
+        legacy = record['approvals'].pop('lead_sourcing_owner')
+        record['approvals']['roxy'] = legacy
+        before = deepcopy(record)
+        result = self.evaluate(record)
+        self.assertEqual(result['decision'], 'pending')
+        self.assertIn('LEAD_SOURCING_OWNER_APPROVAL_REQUIRED', result['reason_codes'])
+        self.assertEqual(result['historical_approvals']['roxy'], legacy)
+        self.assertEqual(record, before)
+        result['historical_approvals']['roxy']['state'] = 'changed output only'
+        self.assertEqual(record, before)
+
+    def test_final_approval_cannot_precede_research_review(self):
+        record = contact()
+        record['approvals']['lead_sourcing_owner']['observed_at'] = '2030-01-01T01:00:00Z'
+        result = self.evaluate(record)
+        self.assertEqual(result['decision'], 'pending')
+        self.assertIn('BRIDGET_APPROVAL_PRECEDES_RESEARCH_REVIEW', result['reason_codes'])
 
     def test_missing_malformed_or_wrong_subject(self):
         for record in [None, [], {}, {'checks': []}, {'subject': {}, 'approvals': []}]:
