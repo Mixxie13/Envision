@@ -72,7 +72,7 @@ python3 scripts/dripify.py search --email person@example.com
 | Operation | Relay method and path | JSON body |
 | --- | --- | --- |
 | Campaign listing | `GET /dripify/campaigns` | None |
-| Lead search by LinkedIn | `POST /dripify/leads/search` | `{"linkedin_url":"https://www.linkedin.com/in/example"}` |
+| Lead search by LinkedIn | `POST /dripify/leads/search` | `{"linkedinUrl":"https://www.linkedin.com/in/example"}` |
 | Secondary lead search by email | `POST /dripify/leads/search` | `{"email":"person@example.com"}` |
 
 Search accepts exactly one identifier so the workflow can inspect LinkedIn results
@@ -86,3 +86,12 @@ on explicit no-match; flag existing leads without duplicating them. Only confirm
 absence permits the review flag `eligible for Dripify outreach`. Missing identifiers,
 errors and ambiguity remain pending. There are no create, enrollment, campaign-add
 or send commands. Listing campaigns does not select or join a campaign.
+
+## Reusable batch research (prototype)
+
+See [SOURCING_WORKFLOW.md](SOURCING_WORKFLOW.md) for `source_batch.py` intake,
+checkpoint/resume, controlled batch execution and workbook updates. It preserves
+original spreadsheet order/values and paid-operation restrictions. Account-wide
+Dripify read/history retrieval was previously validated on the PR #7 deployment,
+but complete account/history coverage and dependable AI/contact research remain unresolved; do not
+treat saved stage progress as prospect or outreach clearance.

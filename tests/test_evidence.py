@@ -18,7 +18,7 @@ def fixture(channel='linkedin'):
     record = {'subject': subject, 'channel': channel, 'unresolved_risks': [],
               'approvals': {person: {'state': 'approved', 'source': 'synthetic review',
                                     'subject': subject, 'observed_at': '2030-01-01T00:00:00Z'}
-                            for person in ('roxy', 'bridget')}}
+                            for person in ('lead_sourcing_owner', 'bridget')}}
     envelopes = []
     for name, result in eligibility.CHECKS.items():
         envelopes.append({'schema': evidence.SCHEMA, 'check': name,

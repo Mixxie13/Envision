@@ -120,6 +120,6 @@ def assemble(record, envelopes):
 
 
 def evaluate_evidence(record, envelopes, now=None):
-    """Safe handoff to unchanged Phase 1, retaining provenance separately."""
+    """Safe handoff to the eligibility evaluator, retaining provenance separately."""
     assembled = assemble(record, envelopes)
     return {**assembled, 'evaluation': eligibility.evaluate(assembled['record'], now=now)}
