@@ -110,3 +110,21 @@ class ApolloTests(unittest.TestCase):
         provider=Providers(self.state);provider.apollo_client=ApolloPeople(self.state,True,Mock(return_value={'people':[self.person()],'total_entries':1}))
         with patch.dict('os.environ',{'APOLLO_API_KEY':'synthetic-key'}):result=provider.apollo(self.company)
         self.assertFalse(result['account_schema_verified']);self.assertEqual(len(self.state.contacts()),0)
+
+    def test_authorization_budget_persists_across_instances_and_domains(self):
+        self.authorize();auth=self.state.meta('apollo_read_authorization');auth['max_requests']=1;self.state.set_meta('apollo_read_authorization',auth)
+        fetch=Mock(return_value={'people':[],'total_entries':0})
+        with patch.dict('os.environ',{'APOLLO_API_KEY':'synthetic-key'}),patch('time.sleep'):
+            ApolloPeople(self.state,True,fetch).discover(self.company)
+            other={**self.company,'id':'synthetic-other'}
+            self.state.set_meta('apollo_company_binding:'+other['id'],{'verified':True,'domain':'different.example.com','evidence_ref':'synthetic-domain'})
+            result=ApolloPeople(self.state,True,fetch).discover(other)
+        self.assertEqual(fetch.call_count,1);self.assertIn('BUDGET_EXHAUSTED',result['reason'])
+
+    def test_known_403_checkpoint_is_not_retried_after_restart(self):
+        from apollo import ApolloError
+        self.authorize();fetch=Mock(side_effect=ApolloError('APOLLO_HTTP_403'))
+        with patch.dict('os.environ',{'APOLLO_API_KEY':'synthetic-key'}),patch('time.sleep'):
+            ApolloPeople(self.state,True,fetch).discover(self.company)
+            ApolloPeople(self.state,True,fetch).discover(self.company)
+        self.assertEqual(fetch.call_count,1)

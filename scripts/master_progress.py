@@ -83,7 +83,8 @@ def snapshot(state, clock=None):
         manifest = [c['data'] for c in companies]
         if digest(manifest) != state.meta('master_signature'):
             raise ValueError('Legacy source integrity mismatch; original import needed')
-        state.set_meta('source_manifest', manifest)
+        if not state.db.execute('PRAGMA query_only').fetchone()[0]:
+            state.set_meta('source_manifest', manifest)
     if digest(manifest) != state.meta('master_signature'):
         raise ValueError('Original source manifest integrity mismatch')
     current = {c['id']: c for c in companies}
@@ -146,7 +147,7 @@ def snapshot(state, clock=None):
             reasons.append('POTENTIAL_DUPLICATE_SOURCE_ROWS_PRESERVED')
         outcomes.append({'company_id': cid, 'original_position': position, 'source_row': original['source_row'],
                          'batch': (position - 1) // 10 + 1, 'company': original['company'],
-                         'original_values': original['original'], 'original_priority': original['mapped'].get('priority'),
+                         'original_values': original['original'], 'original_columns': original.get('original_columns'), 'original_priority': original['mapped'].get('priority'),
                          'original_category': original['mapped'].get('category'), 'source_row_intact': intact,
                          'outcome': outcome, 'stage_statuses': jobs, 'research_sources_observed': researched,
                          'confirmed_contacts': confirmed, 'existing_hubspot_contacts': existing,

@@ -162,8 +162,10 @@ def extract(html, source):
             'links': page.links, 'segments': page.segments[:2500], 'text_excerpt': ' '.join(page.text)[:80000]}
 
 
-def relevant_role(title):
+def relevant_role(title, approved_small_company_fallback=False):
     value = title.lower()
+    if approved_small_company_fallback and value.strip() in ('founder','owner','co-founder','cofounder','founder and owner'):
+        return True
     excluded = ('sales', 'finance', 'customer support', 'customer service', 'engineering', 'operations', 'human resources', 'design', 'product manager', 'chief executive', 'ceo', 'founder', 'owner', 'cmo', 'chief marketing', 'general manager', 'general management', 'managing director')
     if any(s in value for s in excluded):
         return False  # Founder/executive exceptions require evidence/review, never automatic.

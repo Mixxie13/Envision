@@ -133,7 +133,10 @@ class Providers:
                     risks.add('IDENTITY_CONFLICT')
             payload = {**candidate, 'blocked': False,
                        'risks': sorted(risks), 'source': 'Apollo People API Search: ' + candidate['apollo_person_id'],
-                       'research_status': 'apollo_candidate_current_employment_pending'}
+                       'research_status': 'apollo_candidate_current_employment_pending',
+                       'source_url': 'https://api.apollo.io/api/v1/mixed_people/api_search',
+                       'evidence_date': (result.get('observations') or [{}])[-1].get('observed_at'),
+                       'observed_at': (result.get('observations') or [{}])[-1].get('observed_at')}
             self.state.contact('apollo:' + digest([company['id'], candidate['apollo_person_id']])[:24], company['id'], payload)
         return result
 
@@ -143,6 +146,23 @@ class Providers:
             person = subject['data']
             if person.get('research_excluded'):
                 results.append({'contact_id': subject['id'], 'reason': 'EXCLUDED_ROLE_NO_FURTHER_PROVIDER_LOOKUP'})
+                continue
+            from screening import email, _verified_aliases
+            profile = linkedin(person.get('linkedin_url')); address = email(person.get('email'))
+            retained = []
+            for candidate in self.state.contacts():
+                known_person = candidate['data']; raw = known_person.get('raw_record')
+                if not (known_person.get('hubspot_contact_id') and isinstance(raw,dict) and
+                        str(raw.get('id')) == str(known_person['hubspot_contact_id'])): continue
+                profile_match = bool(profile and linkedin(known_person.get('linkedin_url')) == profile)
+                email_match = bool(address and address in ({email(known_person.get('email'))} | _verified_aliases(known_person)))
+                if profile_match or email_match:
+                    retained.append({'id':str(known_person['hubspot_contact_id']), 'basis':'linkedin' if profile_match else 'email',
+                                     'source_ref':'retained-local-crm-record', 'freshness':'unknown'})
+            if retained:
+                results.append({'contact_id':subject['id'],'name':person.get('name'),'role':person.get('role'),
+                    'linkedin_url':person.get('linkedin_url'),'matches':retained,'coverage_complete':False,
+                    'reason':'RETAINED_EXACT_IDENTIFIER_MATCH_REQUIRES_IDENTITY_HISTORY_REVIEW','state':'pending'})
                 continue
             if person.get('hubspot_contact_id') or person.get('hubspot_lookup_cached'):
                 cid = person.get('hubspot_contact_id')

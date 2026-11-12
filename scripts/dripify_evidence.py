@@ -111,8 +111,9 @@ class Collector:
     No TTL is invented: cached observations stay dated and cannot clear outreach.
     Caller must hold the project's existing single-writer lock.
     """
-    def __init__(self, state, fetch=read, max_requests=12, max_pages=2):
+    def __init__(self, state, fetch=read, max_requests=12, max_pages=2, before_request=None):
         self.state, self.fetch = state, fetch
+        self.before_request = before_request
         self.remaining, self.max_pages = max_requests, max_pages
         self.requests = 0
         self.visited = set()
@@ -121,6 +122,7 @@ class Collector:
     def _read(self, path, query=None):
         if self.remaining <= 0:
             raise ReadFailure('RUN_REQUEST_BUDGET_REACHED')
+        if self.before_request is not None: self.before_request()
         self.remaining -= 1
         self.requests += 1
         import time
@@ -237,6 +239,7 @@ class Collector:
         self.requests += 1
         time.sleep(1.1)
         try:
+            if self.before_request is not None: self.before_request()
             data = request('dripify', 'search', linkedin_url='https://' + profile)['data']
             if not isinstance(data, list) or any(not isinstance(r, dict) or not str(r.get('id', '')).isdigit() for r in data):
                 raise ReadFailure('UNEXPECTED_LOOKUP_SCHEMA')

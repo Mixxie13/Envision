@@ -246,3 +246,59 @@ class CandidateHandoffTests(unittest.TestCase):
         with self.assertRaises(ValueError):ingest(self.state,[{**row,'linkedin_url':'https://linkedin.com/in/new'}],clock=NOW)
         self.assertEqual(len(self.state.contacts()),1)
         self.assertEqual(ingest(self.state,[{**row,'candidate_record_id':cid,'linkedin_url':'https://linkedin.com/in/new'}],clock=NOW),[cid])
+
+    def test_incomplete_discovery_metadata_requires_explicit_current_qc_resolution(self):
+        from sourcing_state import digest
+        row,cid=self.positive();row['original_source_url']=None;row['evidence_date']=None
+        ingest(self.state,[row],clock=NOW)
+        self.assertFalse(self.view(cid)['confirmed_current_employment'])
+        fact=self.person(cid)['handoff']['facts'][0];claim=row['employment_claims'][0]
+        resolution={'fact_id':digest(fact),'resolution':'superseded','superseding_claim_id':digest(claim),
+                    'reviewer_role':'lead_sourcing_owner','evidence_ref':claim['source_url'],'reviewed_at':'2030-01-02T11:00:00Z'}
+        row['fact_resolutions']=[resolution];ingest(self.state,[row],clock=NOW)
+        self.assertTrue(self.view(cid)['confirmed_current_employment'])
+        self.assertEqual(len(self.person(cid)['handoff']['facts']),1)
+        self.assertEqual(self.view(cid)['outreach_eligibility'],'pending')
+
+    def test_fact_resolution_cannot_waive_identity_conflict_or_suppression(self):
+        from sourcing_state import digest
+        row,cid=self.positive();row['evidence_date']=None;ingest(self.state,[row],clock=NOW)
+        p=self.person(cid);p['risks']=['IDENTITY_CONFLICT','HISTORICAL_HARD_BOUNCE'];p['blocked']=True;self.state.contact(cid,self.company['id'],p)
+        claim=row['employment_claims'][0]
+        row['fact_resolutions']=[{'fact_id':digest(p['handoff']['facts'][0]),'resolution':'superseded','superseding_claim_id':digest(claim),
+            'reviewer_role':'lead_sourcing_owner','evidence_ref':claim['source_url'],'reviewed_at':'2030-01-02T11:00:00Z'}]
+        ingest(self.state,[row],clock=NOW)
+        self.assertFalse(self.view(cid)['confirmed_current_employment']);self.assertEqual(self.view(cid)['outreach_eligibility'],'blocked')
+
+    def test_founder_fallback_requires_explicit_current_small_company_qc(self):
+        row,cid=self.positive();row['job_title']='Founder';row['employment_claims'][0]['role']='Founder'
+        row['employment_claims'][0]['quote']='Jane Example currently works as Founder at ATTITUDE.'
+        ingest(self.state,[row],clock=NOW);self.assertFalse(self.view(cid)['confirmed_current_employment'])
+        row['small_company_fallback']={'company':'ATTITUDE','small_company':True,'marketing_research_completed':True,
+            'reason':'no_marketing_person','reviewer_role':'lead_sourcing_owner','reviewed_original':True,
+            'evidence_ref':'synthetic-fallback-research','source_sha256':'synthetic-only','source_url':'https://attitudeliving.com/team',
+            'observed_at':'2030-01-02T10:00:00Z','expires_at':'2030-01-03T10:00:00Z'}
+        ingest(self.state,[row],clock=NOW);self.assertTrue(self.view(cid)['confirmed_current_employment'])
+        self.assertEqual(self.view(cid)['outreach_eligibility'],'pending')
+
+    def test_current_duplicate_checked_candidate_can_enter_research_review_not_campaign(self):
+        row,cid=self.positive()
+        for provider in ('hubspot_duplicate','dripify_duplicate'):
+            envelope=deepcopy(row['envelopes'][0]);envelope['check']=provider;envelope['evidence']['result']='absent'
+            row['envelopes'].append(envelope)
+        ingest(self.state,[row],clock=NOW);path=self.root/'review-qualified.xlsx';update(self.state,path,NOW);update(self.state,path,NOW)
+        b=load_workbook(path);rows=list(b['New Prospect Contacts'].values)[1:];b.close()
+        self.assertEqual(len(rows),1);self.assertEqual(rows[0][4],'Jane Example')
+        self.assertEqual(rows[0][8],'No verified personal email found')
+        self.assertEqual(self.view(cid)['outreach_eligibility'],'pending')
+
+    def test_incomplete_duplicate_check_and_manual_prospect_edits_are_not_overwritten(self):
+        row,cid=self.positive();ingest(self.state,[row],clock=NOW)
+        path=self.root/'manual-review.xlsx';update(self.state,path,NOW);b=load_workbook(path)
+        self.assertEqual(b['New Prospect Contacts'].max_row,1);b.close()
+        for provider in ('hubspot_duplicate','dripify_duplicate'):
+            envelope=deepcopy(row['envelopes'][0]);envelope['check']=provider;envelope['evidence']['result']='absent';row['envelopes'].append(envelope)
+        ingest(self.state,[row],clock=NOW);update(self.state,path,NOW)
+        b=load_workbook(path);b['New Prospect Contacts'].cell(2,5).value='Manual correction';b.save(path);b.close()
+        update(self.state,path,NOW);b=load_workbook(path)
+        self.assertEqual(b['New Prospect Contacts'].max_row,2);self.assertEqual(b['New Prospect Contacts'].cell(2,5).value,'Manual correction');b.close()

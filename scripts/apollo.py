@@ -72,7 +72,8 @@ def normalize_person(row, expected_domain, organization_id=None, parent=False):
 
 
 class ApolloPeople:
-    def __init__(self, state, enabled=False, fetch=None, max_requests=4, max_pages=2):
+    def __init__(self, state, enabled=False, fetch=None, max_requests=4, max_pages=2, before_request=None):
+        self.before_request = before_request
         self.state, self.enabled = state, enabled
         self.fetch = fetch or self._fetch
         self.remaining = min(max_requests, 4)
@@ -116,7 +117,10 @@ class ApolloPeople:
         key = os.environ.get('APOLLO_API_KEY', '')
         if not key.strip(): return {**pending, 'reason': 'APOLLO_CREDENTIAL_NOT_CONFIGURED'}
         # Shared domain cache avoids repeating requests for duplicate source rows.
-        cache_key = 'apollo-people-v1:' + digest([expected, binding.get('organization_id'), parent, TITLES])
+        cache_identity = [expected, binding.get('organization_id'), parent, TITLES]
+        capability_ref = self.state.meta('verified_provider_capability:apollo', {}).get('evidence_ref')
+        if capability_ref: cache_identity.append(capability_ref)
+        cache_key = 'apollo-people-v1:' + digest(cache_identity)
         checkpoint = self.state.meta(cache_key, {'candidates': [], 'next_page': 1,
             'pagination_complete': False, 'seen_ids': [], 'rejections': {}, 'observations': []})
         if cache_key in self.visited or checkpoint['pagination_complete'] or checkpoint.get('stalled'):
@@ -128,9 +132,18 @@ class ApolloPeople:
             params = {'q_organization_domains_list[]': [expected], 'person_titles[]': TITLES,
                       'person_not_titles[]': EXCLUDED, 'include_similar_titles': 'false', 'page': page, 'per_page': 25}
             if binding.get('organization_id'): params['organization_ids[]'] = [str(binding['organization_id'])]
-            # No countries, saved-company/view filters, email status or reveal options.
+            # Authorization budgets persist across restarts and company domains.
+            usage_key = 'apollo-authorization-usage:' + digest(auth['evidence_ref'])
+            usage = self.state.meta(usage_key, {'requests_reserved': 0})
+            if usage['requests_reserved'] >= authorized_budget:
+                checkpoint['reason'] = 'APOLLO_AUTHORIZATION_BUDGET_EXHAUSTED'
+                self.state.set_meta(cache_key, checkpoint)
+                break
+            usage['requests_reserved'] += 1
+            self.state.set_meta(usage_key, usage)
             self.remaining -= 1; self.requests += 1; time.sleep(1.1)
             try:
+                if self.before_request is not None: self.before_request()
                 data = self.fetch(params, key)
                 if not isinstance(data, dict) or not isinstance(data.get('people'), list): raise ApolloError('UNVERIFIED_RESPONSE_SCHEMA')
                 rows = data['people']
@@ -164,6 +177,7 @@ class ApolloPeople:
             except ApolloError as exc:
                 self.stopped = True
                 checkpoint['reason'] = str(exc)
+                checkpoint['stalled'] = True
                 self.state.set_meta(cache_key, checkpoint);break
         return self._result(pending, checkpoint)
 

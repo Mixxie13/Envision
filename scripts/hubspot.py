@@ -27,7 +27,8 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 class Client:
     """Only property discovery, record reads, searches and association reads."""
-    def __init__(self):
+    def __init__(self, before_request=None):
+        self.before_request = before_request
         self._key = os.environ.get('HUBSPOT_ACCESS_TOKEN', '')
         self._opener = urllib.request.build_opener(NoRedirect())
         self._properties = {}
@@ -66,6 +67,7 @@ class Client:
             raise ValueError('Operation is not an allowlisted read')
         if not self._key.strip():
             raise ReadError('CREDENTIAL_MISSING')
+        if self.before_request is not None: self.before_request()
         url = 'https://api.hubapi.com' + path
         if query:
             url += '?' + urllib.parse.urlencode(query)

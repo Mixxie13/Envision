@@ -243,7 +243,7 @@ def apply_atomic(project, workbook, inspection):
     with project_lock(project):
         recover_import(project, workbook)
         # Validate inputs before staging any persistent data changes.
-        from workbook import validate, update
+        from workbook import validate, update, safe
         from master_progress import write_reports
         book = load_workbook(workbook)
         state, stage = None, None
@@ -253,7 +253,7 @@ def apply_atomic(project, workbook, inspection):
             companies = state.companies()
             if not state.meta('master_signature'): raise ValueError('Initialized source project required')
             for company in companies:
-                if book['Company Research'].cell(company['position']+1, 1).value != company['data']['company']:
+                if book['Company Research'].cell(company['position']+1, 1).value != safe(company['data']['company']):
                     raise ValueError('Workbook source order mismatch')
             if state.db.execute('PRAGMA journal_mode').fetchone()[0] != 'delete':
                 raise ValueError('Exclusive rollback-journal SQLite project required')
